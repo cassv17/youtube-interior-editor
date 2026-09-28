@@ -1,5 +1,7 @@
 # 영상 자동편집
 
+GitHub: https://github.com/cassv17/youtube-interior-editor
+
 유튜브 롱폼 영상의 **무음 구간 컷**과 **자막 달기**를 자동으로 해 주는 프로그램입니다.
 브라우저 화면에서 결과를 확인하고 고친 뒤, 완성된 mp4(와 srt 자막 파일)로 내보냅니다.
 
