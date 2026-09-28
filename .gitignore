@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# 음성인식 모델 (설치.bat이 자동으로 내려받음)
+models/
+
+# 사용자 데이터 (영상, 프로젝트 작업 내용) — 절대 커밋하지 않음
+workspace/
+output/
+예시파일/
+
+# 프론트엔드
+frontend/node_modules/
+frontend/dist/
+
+# 기타
+*.log
+.DS_Store
+Thumbs.db
+frontend/tsconfig.tsbuildinfo

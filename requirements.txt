@@ -1,0 +1,6 @@
+# 음성인식 (2단계)
+faster-whisper==1.2.1
+# 로컬 웹 서버 (3단계)
+fastapi==0.141.1
+uvicorn==0.54.0
+python-multipart==0.0.32
