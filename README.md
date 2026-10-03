@@ -11,14 +11,31 @@ GitHub: https://github.com/cassv17/youtube-interior-editor
 
 ---
 
+## 0. GitHub에서 받아 설치하기 (처음 쓰는 분)
+
+**준비물:** Windows 10/11 PC, 인터넷(설치할 때만), 여유 공간 약 5GB. 별도 그래픽카드는 필요 없습니다.
+
+1. 이 페이지 위쪽의 초록색 **`<> Code`** 버튼 → **Download ZIP**을 눌러 내려받습니다.
+   (Git을 쓰실 줄 안다면 `git clone https://github.com/cassv17/youtube-interior-editor.git`도 됩니다.)
+2. 받은 ZIP 파일을 **마우스 오른쪽 → 모두 압축 풀기**로 풉니다. 폴더 위치는 `C:\영상편집`처럼 짧은 곳을 권장합니다.
+   (ZIP 안에서 바로 실행하면 오류가 납니다. 반드시 압축을 푼 뒤에 쓰세요.)
+3. 아래 **1. 처음 한 번만: 설치**의 프로그램 3개(Python, ffmpeg, Node.js)를 준비합니다.
+4. 압축 푼 폴더의 **`설치.bat`**을 더블클릭하고, 끝나면 **`실행.bat`**을 더블클릭합니다.
+
+> 처음 설치할 때 **Windows 보호 화면**("PC를 보호했습니다")이 뜨면 **추가 정보 → 실행**을 누르세요. 인터넷에서 받은 .bat 파일에 항상 뜨는 안내입니다.
+> 영상 파일은 어디에도 업로드되지 않고, 이 PC 안에서만 처리됩니다.
+
+---
+
 ## 1. 처음 한 번만: 설치
 
-### 1-1. 미리 필요한 프로그램 2개
+### 1-1. 미리 필요한 프로그램 3개
 
 | 프로그램 | 확인 방법 | 없을 때 설치 방법 |
 |---|---|---|
 | **Python 3.11** | 설치.bat이 자동으로 확인합니다 | [python.org](https://www.python.org/downloads/release/python-3119/)에서 **Windows installer (64-bit)**를 받아 실행하세요. 첫 화면에서 **"Add python.exe to PATH"**를 꼭 체크한 뒤 Install Now를 누릅니다. |
 | **ffmpeg** | 설치.bat이 자동으로 확인합니다 | 시작 메뉴에서 **명령 프롬프트**를 열고 `winget install Gyan.FFmpeg`를 입력한 뒤 Enter를 누릅니다. 끝나면 명령 프롬프트를 닫습니다. |
+| **Node.js** (LTS) | 설치.bat이 자동으로 확인합니다 | [nodejs.org](https://nodejs.org)에서 **LTS** 버전을 받아 설치하세요(계속 Next). 화면 파일을 만들 때 한 번만 쓰입니다. |
 
 ### 1-2. 설치.bat 실행
 
