@@ -203,3 +203,12 @@ ul.files li { padding: 3px 0; }
 ul.files a { color: #8fb6ff; text-decoration: none; word-break: break-all; }
 ul.files a:hover { text-decoration: underline; }
 .done .folder { margin-top: 4px; font-weight: 600; }
+
+/* 레퍼런스 영상 */
+.ref-box { border: 1px dashed var(--line); border-radius: 8px; padding: 12px 14px; margin: 14px 0; }
+.ref-box h3 { margin: 0 0 4px; font-size: 14px; }
+.ref-box h3 small { color: var(--muted); font-weight: 400; }
+.ref-result { margin-top: 10px; }
+.ref-name { font-weight: 600; margin-bottom: 6px; }
+.ref-name button { margin-left: 8px; }
+.swatch { display: inline-block; width: 12px; height: 12px; border: 1px solid var(--line); border-radius: 2px; vertical-align: -1px; }

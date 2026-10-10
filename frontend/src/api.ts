@@ -101,6 +101,38 @@ export interface Group {
   clips: string[];
 }
 
+export interface ReferenceRhythm {
+  ok: boolean;
+  note: string;
+  label?: "빠름" | "보통" | "느림";
+  median_pause?: number;
+  p90_pause?: number;
+  pauses_per_min?: number;
+  speech_ratio?: number;
+  silence?: { min_silence: number; pad: number };
+}
+
+export interface ReferenceSubtitle {
+  ok: boolean;
+  note: string;
+  confidence?: number;
+  style?: Partial<Pick<Style, "position" | "margin" | "size" | "color" | "outline_color">>;
+}
+
+export interface ReferenceResult {
+  name: string;
+  duration: number;
+  rhythm: ReferenceRhythm;
+  subtitle: ReferenceSubtitle;
+}
+
+export interface ReferenceNote {
+  name: string;
+  rhythm_applied: boolean;
+  style_applied: boolean;
+  summary: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -122,6 +154,7 @@ export interface Project {
   export_job?: ExportJob | null;
   exports?: ExportResult[];
   groups?: Group[];
+  reference?: ReferenceNote;
   proxy?: string;
   // 완료된 작업(편집 기록은 지워지고 결과 정보만 남음)
   completed?: string;
@@ -166,8 +199,13 @@ const json = (method: string, body: unknown): RequestInit => ({
 export const api = {
   list: () => request<ProjectSummary[]>("/api/projects"),
   get: (id: string) => request<Project>(`/api/projects/${id}`),
-  start: (id: string, order: string[], silence: SilenceParams) =>
-    request<{ ok: boolean }>(`/api/projects/${id}/start`, json("POST", { order, silence })),
+  start: (id: string, order: string[], silence: SilenceParams, extra?: { style?: Partial<Style>; reference?: ReferenceNote }) =>
+    request<{ ok: boolean }>(`/api/projects/${id}/start`, json("POST", { order, silence, ...extra })),
+  analyzeReference: (file: File) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return request<ReferenceResult>("/api/reference", { method: "POST", body: form });
+  },
   saveEdits: (id: string, edits: { cuts: Cut[]; subtitles: Subtitle[]; style: Style }) =>
     request<{ ok: boolean; updated: string }>(`/api/projects/${id}/edits`, json("PUT", edits)),
   redetect: (id: string, params: SilenceParams) =>

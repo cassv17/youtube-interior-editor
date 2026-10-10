@@ -60,6 +60,15 @@ def create_project(files: list[UploadFile]):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/reference")
+def analyze_reference(file: UploadFile):
+    """레퍼런스 영상을 분석해 추정한 편집 리듬·자막 스타일을 돌려준다. 영상은 저장하지 않는다."""
+    try:
+        return jobs.analyze_reference(file.filename or "reference.mp4", file.file)
+    except (ValueError, MediaError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/projects/{pid}")
 def get_project(pid: str):
     data = _get(pid)
@@ -70,7 +79,8 @@ def get_project(pid: str):
 def start(pid: str, body: dict):
     _get(pid)
     try:
-        jobs.start_analysis(pid, list(body.get("order", [])), _params(body.get("silence", {})))
+        jobs.start_analysis(pid, list(body.get("order", [])), _params(body.get("silence", {})),
+                            style=body.get("style"), ref=body.get("reference"))
     except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
     return {"ok": True}

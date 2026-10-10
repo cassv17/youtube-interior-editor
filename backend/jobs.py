@@ -11,13 +11,14 @@ import os
 import queue
 import re
 import shutil
+import tempfile
 import threading
 import time
 import traceback
 from datetime import datetime
 from pathlib import Path
 
-from .core import export as export_mod, media, project as proj_mod, render, silence
+from .core import export as export_mod, media, project as proj_mod, reference, render, silence
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECTS_DIR = ROOT / "workspace" / "projects"
@@ -104,6 +105,41 @@ def create_project(uploads: list[tuple[str, object]]) -> dict:
     return data
 
 
+# ---------- 레퍼런스 ----------
+
+HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def analyze_reference(name: str, fobj) -> dict:
+    """레퍼런스 영상을 임시 폴더에 받아 분석하고 바로 지운다(저장하지 않는다)."""
+    if Path(name).suffix.lower() not in VIDEO_EXT:
+        raise ValueError(f"지원하지 않는 파일 형식입니다: {name} (mp4/mov/m4v만 가능)")
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / f"reference{Path(name).suffix.lower()}"
+        with open(path, "wb") as out:
+            shutil.copyfileobj(fobj, out, 1024 * 1024)
+        result = reference.analyze(str(path))
+    result["name"] = name
+    return result
+
+
+def clean_style(style: dict | None) -> dict:
+    """화면에서 넘어온 자막 스타일 중 허용된 항목만 걸러 낸다(잘못된 값은 버린다)."""
+    s = style or {}
+    out: dict = {}
+    if s.get("position") in ("top", "bottom"):
+        out["position"] = s["position"]
+    for key, lo, hi in (("margin", 0.0, 30.0), ("size", 2.0, 12.0)):
+        try:
+            out[key] = round(max(lo, min(hi, float(s[key]))), 1)
+        except (KeyError, TypeError, ValueError):
+            pass
+    for key in ("color", "outline_color"):
+        if isinstance(s.get(key), str) and HEX_COLOR.match(s[key]):
+            out[key] = s[key].upper()
+    return out
+
+
 # ---------- 분석 작업 ----------
 
 def status(pid: str) -> dict | None:
@@ -114,7 +150,8 @@ def _set(pid: str, **kw) -> None:
     _status[pid] = {**_status.get(pid, {}), **kw, "time": time.time()}
 
 
-def start_analysis(pid: str, order: list[str], params: silence.SilenceParams) -> None:
+def start_analysis(pid: str, order: list[str], params: silence.SilenceParams,
+                   style: dict | None = None, ref: dict | None = None) -> None:
     with lock(pid):
         data = load(pid)
         if data["status"] == "analyzing" and pid in _status:
@@ -124,6 +161,9 @@ def start_analysis(pid: str, order: list[str], params: silence.SilenceParams) ->
             raise ValueError("클립 순서 정보가 올바르지 않습니다.")
         data["order"] = order
         data["pending_params"] = params.to_dict()
+        data["pending_style"] = clean_style(style)
+        if ref:
+            data["reference"] = {k: ref[k] for k in ("name", "rhythm_applied", "style_applied", "summary") if k in ref}
         data["status"] = "analyzing"
         data.pop("error", None)
         save(pid, data)
@@ -149,6 +189,7 @@ def _run(pid: str) -> None:
     paths = [by_sid[sid]["path"] for sid in data["order"]]
     original_name = {by_sid[sid]["path"]: by_sid[sid]["name"] for sid in data["order"]}
     params = silence.SilenceParams(**data["pending_params"])
+    pending_style = data.get("pending_style") or {}
 
     # 1) 음량 측정 + 무음 컷 (빠름)
     cache = load_levels(pid)
@@ -156,6 +197,7 @@ def _run(pid: str) -> None:
     built = proj_mod.build_project(
         paths, params, levels_cache=cache,
         progress=lambda i, n, _name: _set(pid, progress=i / n, detail=original_name[paths[i]]))
+    built["style"] = {**built["style"], **pending_style}  # 레퍼런스에서 읽은 자막 스타일
     for clip in built["clips"]:  # 화면에는 사본 이름(01_...) 대신 원래 파일명을 보여준다
         clip["name"] = original_name.get(clip["path"], clip["name"])
     _levels_path(pid).write_text(json.dumps(cache), encoding="utf-8")
@@ -172,7 +214,7 @@ def _run(pid: str) -> None:
         progress=lambda f, name: _set(pid, stage="음성인식 중", progress=f, detail=name))
 
     with lock(pid):
-        keep = {k: data[k] for k in ("id", "name", "created", "sources", "order", "exports") if k in data}
+        keep = {k: data[k] for k in ("id", "name", "created", "sources", "order", "exports", "reference") if k in data}
         save(pid, {**built, **keep, "status": "ready"})
     _set(pid, stage="완료", progress=1.0, detail="")
 

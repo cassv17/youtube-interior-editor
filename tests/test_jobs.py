@@ -52,6 +52,36 @@ class JobsTest(unittest.TestCase):
         jobs._run(pid)
         return jobs.load(pid)
 
+    def test_reference_style_and_rhythm_are_applied(self):
+        """레퍼런스에서 읽은 자막 스타일·무음 설정이 분석 결과에 반영되고, 잘못된 값은 걸러진다."""
+        pid = self.upload()
+        style = {"position": "top", "margin": 9.5, "size": 6.0, "color": "#ffe000",
+                 "font": "Evil Font", "outline_color": "red", "size_x": 1}
+        note = {"name": "ref.mp4", "rhythm_applied": True, "style_applied": True,
+                "summary": "편집 리듬·자막 스타일 적용", "junk": "x"}
+        jobs.start_analysis(pid, ["s1", "s2"], silence.SilenceParams(min_silence=0.9, pad=0.1), style=style, ref=note)
+        jobs._queue.get()
+        jobs._run(pid)
+        data = jobs.load(pid)
+        self.assertEqual(data["status"], "ready")
+        self.assertEqual(data["style"]["position"], "top")
+        self.assertEqual(data["style"]["margin"], 9.5)
+        self.assertEqual(data["style"]["color"], "#FFE000")
+        self.assertEqual(data["style"]["font"], "Malgun Gothic")        # 허용하지 않은 항목은 무시
+        self.assertEqual(data["style"]["outline_color"], "#000000")     # 형식이 틀린 색은 무시
+        self.assertEqual(data["silence_params"]["min_silence"], 0.9)
+        self.assertEqual(data["reference"]["summary"], "편집 리듬·자막 스타일 적용")
+        self.assertNotIn("junk", data["reference"])
+
+    def test_clean_style_clamps_values(self):
+        self.assertEqual(jobs.clean_style(None), {})
+        self.assertEqual(jobs.clean_style({"margin": 999, "size": -3}), {"margin": 30.0, "size": 2.0})
+        self.assertEqual(jobs.clean_style({"position": "left", "margin": "abc"}), {})
+
+    def test_analyze_reference_rejects_non_video(self):
+        with self.assertRaises(ValueError):
+            jobs.analyze_reference("memo.txt", io.BytesIO(b"x"))
+
     def test_full_pipeline(self):
         pid = self.upload()
         data = jobs.load(pid)
