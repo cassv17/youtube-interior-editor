@@ -1,11 +1,12 @@
 import { useState } from "react";
-import type { ClipAnalysis, Clip, Cut, SilenceParams, Style, Subtitle } from "./api";
+import type { ClipAnalysis, Clip, Cut, SilenceParams, SpeedRange, Style, Subtitle } from "./api";
 import type { Selection } from "./Timeline";
 import { fmt, snap } from "./time";
 
 export interface EditDoc {
   cuts: Cut[];
   subtitles: Subtitle[];
+  speeds: SpeedRange[];
   style: Style;
 }
 
@@ -25,6 +26,8 @@ interface Props {
   onPlayFrom: (t: number) => void;
   onAddCut: () => void;
   onAddSub: () => void;
+  onAddSpeed: () => void;
+  requestNotes: string[]; // 처음 요청 중 자동으로 적용하지 못한 항목
   onRedetect: (p: SilenceParams) => Promise<void>;
 }
 
@@ -60,6 +63,10 @@ function EditTab(p: Props) {
     const c = p.doc.cuts.find((x) => x.id === sel.id);
     if (c) return <CutEditor {...p} cut={c} />;
   }
+  if (sel?.kind === "speed") {
+    const r = p.doc.speeds.find((x) => x.id === sel.id);
+    if (r) return <SpeedEditor {...p} range={r} />;
+  }
   return <Overview {...p} />;
 }
 
@@ -79,11 +86,34 @@ function Overview(p: Props) {
         <dt>컷 적용 후</dt><dd><b>{fmt(p.resultDuration)}</b></dd>
         <dt>적용 컷</dt><dd>{enabled}개{proposals ? ` (꺼진 제안 ${proposals}개)` : ""}</dd>
         <dt>자막</dt><dd>{p.doc.subtitles.length}개</dd>
+        <dt>배속 구간</dt><dd>{p.doc.speeds.length}개</dd>
       </dl>
       <div className="row">
         <button onClick={p.onAddCut}>＋ 현재 위치에 컷</button>
         <button onClick={p.onAddSub}>＋ 현재 위치에 자막</button>
+        <button onClick={p.onAddSpeed}>＋ 현재 위치에 배속</button>
       </div>
+      {p.doc.speeds.length > 0 && (
+        <>
+          <h4>배속 구간</h4>
+          <ul className="review-list speed-list">
+            {[...p.doc.speeds].sort((a, b) => a.start - b.start).map((r) => (
+              <li key={r.id} onClick={() => { p.onSelect({ kind: "speed", id: r.id }); p.onPlayFrom(r.start); }}>
+                <span className="t">{fmt(r.start)}</span>
+                <span className="k">{r.speed}배속</span>
+                <span className="x">{(r.end - r.start).toFixed(1)}초 → 결과 {((r.end - r.start) / r.speed).toFixed(1)}초</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {p.requestNotes.length > 0 && (
+        <div className="reasons">
+          <b>요청사항 중 자동 적용하지 못한 것</b>
+          {p.requestNotes.map((n, i) => <div key={i}>• {n}</div>)}
+          <div className="hint">타임라인에서 컷·배속 구간을 직접 지정해 주세요.</div>
+        </div>
+      )}
       <h4>확인 필요 {items.length}개</h4>
       <p className="hint">자동 판단이 불확실한 곳입니다. 클릭하면 그 위치로 이동합니다. 표시가 없는 자막도 오인식이 있을 수 있으니 한 번씩 훑어보세요.</p>
       <ul className="review-list">
@@ -218,6 +248,39 @@ function CutEditor(p: Props & { cut: Cut }) {
       </div>
       <Reasons reasons={c.review_reasons} onResolve={() => patch((x) => ({ ...x, needs_review: false, review_reasons: [] }))} />
       <p className="hint">타임라인에서 컷 양쪽 끝을 드래그해 범위를 조정할 수 있습니다. 컷을 더블클릭하면 적용/해제가 바뀝니다.</p>
+      <button className="link" onClick={() => p.onSelect(null)}>← 목록으로</button>
+    </div>
+  );
+}
+
+const SPEED_PRESETS = [0.5, 0.75, 1.25, 1.5, 2, 3, 4];
+
+function SpeedEditor(p: Props & { range: SpeedRange }) {
+  const r = p.range;
+  const others = p.doc.speeds.filter((x) => x.id !== r.id);
+  const prevEnd = Math.max(0, ...others.filter((x) => x.end <= r.start + 1e-6).map((x) => x.end));
+  const nextStart = Math.min(p.duration, ...others.filter((x) => x.start >= r.end - 1e-6).map((x) => x.start));
+  const patch = (fn: (x: SpeedRange) => SpeedRange) =>
+    p.update((d) => ({ ...d, speeds: d.speeds.map((x) => (x.id === r.id ? fn(x) : x)) }));
+  const setSpeed = (v: number) => patch((x) => ({ ...x, speed: Math.min(4, Math.max(0.5, Math.round(v * 100) / 100)) }));
+  return (
+    <div className="editor">
+      <h3>배속 구간 <small>{fmt(r.start, 2)} ~ {fmt(r.end, 2)}</small></h3>
+      <div className="presets">
+        {SPEED_PRESETS.map((v) => (
+          <button key={v} className={r.speed === v ? "on" : ""} onClick={() => setSpeed(v)}>{v}x</button>
+        ))}
+      </div>
+      <label className="check">
+        배속(0.5~4)
+        <NumField value={r.speed} onCommit={(v) => { const n = parseFloat(v); if (isFinite(n)) setSpeed(n); }} />
+      </label>
+      <TimeFields start={r.start} end={r.end} min={prevEnd} max={nextStart} onChange={(a, b) => patch((x) => ({ ...x, start: a, end: b }))} />
+      <p className="hint">이 구간은 결과에서 {((r.end - r.start) / r.speed).toFixed(1)}초가 됩니다. 구간 안에 컷이 있으면 컷은 그대로 잘리고 남은 부분만 배속됩니다. 자막 시간은 자동으로 맞춰지고, 음성 높낮이는 유지됩니다.</p>
+      <div className="row">
+        <button onClick={() => p.onPlayFrom(Math.max(0, r.start - 1))}>▶ 1초 앞부터 재생</button>
+        <button className="danger" onClick={() => { p.update((d) => ({ ...d, speeds: d.speeds.filter((x) => x.id !== r.id) })); p.onSelect(null); }}>삭제</button>
+      </div>
       <button className="link" onClick={() => p.onSelect(null)}>← 목록으로</button>
     </div>
   );

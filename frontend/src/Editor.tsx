@@ -5,7 +5,7 @@ import Inspector, { type EditDoc } from "./Inspector";
 import Timeline, { newCut, newSub, type Doc, type Selection } from "./Timeline";
 import { useHistory } from "./useHistory";
 import VideoPreview from "./VideoPreview";
-import { clamp, fmt, snap, uid } from "./time";
+import { clamp, fmt, outputTime, snap, uid } from "./time";
 
 type SaveState = "saved" | "pending" | "saving" | "error";
 
@@ -31,7 +31,7 @@ interface EditorProps {
 const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 
 export default function Editor({ project, onBack, onReload, onFinished }: EditorProps) {
-  const hist = useHistory<EditDoc>({ cuts: project.cuts, subtitles: project.subtitles, style: project.style });
+  const hist = useHistory<EditDoc>({ cuts: project.cuts, subtitles: project.subtitles, speeds: project.speed_ranges ?? [], style: project.style });
   const doc = hist.present;
   const [meta, setMeta] = useState(project); // 클립 분석값·무음 설정 등 (재감지 시 갱신)
   const [wave, setWave] = useState<{ frame_sec: number; db: number[] } | null>(null);
@@ -39,6 +39,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [skipCuts, setSkipCuts] = useState(true);
+  const [applySpeed, setApplySpeed] = useState(true);
   const [pps, setPps] = useState(40);
   const [save, setSave] = useState<SaveState>("saved");
   const [savedAt, setSavedAt] = useState<string>(project.updated ? project.updated.slice(11, 16) : "");
@@ -51,7 +52,11 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
 
   const cutsMerged = useMemo(() => mergedCuts(doc.cuts), [doc.cuts]);
   const removed = cutsMerged.reduce((a, [s, e]) => a + (e - s), 0);
-  const resultDuration = project.duration - removed;
+  const resultDuration = useMemo(
+    () => outputTime(project.duration, cutsMerged, doc.speeds),
+    [project.duration, cutsMerged, doc.speeds],
+  );
+  const curSpeed = doc.speeds.find((r) => time >= r.start && time < r.end)?.speed ?? 1;
   const inCut = cutsMerged.find(([s, e]) => time >= s && time < e);
   const currentSub = doc.subtitles.find((s) => time >= s.start && time < s.end) ?? null;
 
@@ -95,6 +100,10 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
   cutsRef.current = cutsMerged;
   const skipRef = useRef(skipCuts);
   skipRef.current = skipCuts;
+  const speedsRef = useRef(doc.speeds);
+  speedsRef.current = doc.speeds;
+  const applySpeedRef = useRef(applySpeed);
+  applySpeedRef.current = applySpeed;
   useEffect(() => {
     const v = video.current!;
     let timer = 0;
@@ -109,6 +118,9 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
           t = hit[1];
         }
       }
+      // 배속 구간 안에서는 재생 속도를 바꿔 미리 볼 수 있다(음성 높낮이는 브라우저가 유지)
+      const sp = applySpeedRef.current ? speedsRef.current.find((r) => t >= r.start && t < r.end)?.speed ?? 1 : 1;
+      if (v.playbackRate !== sp) v.playbackRate = sp;
       setTime(t);
     };
     const onPlay = () => {
@@ -165,7 +177,9 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
     hist.set((d) =>
       selection.kind === "cut"
         ? { ...d, cuts: d.cuts.filter((c) => c.id !== selection.id) }
-        : { ...d, subtitles: d.subtitles.filter((s) => s.id !== selection.id) },
+        : selection.kind === "speed"
+          ? { ...d, speeds: d.speeds.filter((r) => r.id !== selection.id) }
+          : { ...d, subtitles: d.subtitles.filter((s) => s.id !== selection.id) },
     );
     setSelection(null);
   }, [selection, hist.set]);
@@ -175,6 +189,20 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
     const id = uid("cut");
     hist.set((d) => ({ ...d, cuts: [...d.cuts, newCut(id, t, Math.min(t + 1, project.duration))] }));
     setSelection({ kind: "cut", id });
+  };
+
+  const addSpeed = () => {
+    const t = snap(time);
+    const next = doc.speeds.filter((r) => r.start > t).map((r) => r.start);
+    const inside = doc.speeds.some((r) => t >= r.start && t < r.end);
+    const end = snap(Math.min(t + 5, project.duration, ...next));
+    if (inside || end - t < 0.3) {
+      alert("이 위치에는 이미 배속 구간이 있거나 공간이 부족합니다. 빈 곳으로 이동한 뒤 추가하세요.");
+      return;
+    }
+    const id = uid("spd");
+    hist.set((d) => ({ ...d, speeds: [...d.speeds, { id, start: t, end, speed: 1.5 }] }));
+    setSelection({ kind: "speed", id });
   };
 
   const addSub = () => {
@@ -333,6 +361,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
             style={doc.style}
             subtitle={currentSub}
             inCut={!!inCut && !skipCuts}
+            speed={applySpeed ? curSpeed : 1}
             onClick={togglePlay}
           />
           <div className="controls">
@@ -342,7 +371,13 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
               <input type="checkbox" checked={skipCuts} onChange={(e) => setSkipCuts(e.target.checked)} />
               컷 적용해서 보기 (잘릴 구간 건너뛰기)
             </label>
-            <span className="result">결과 길이 <b>{fmt(resultDuration)}</b> ({removed.toFixed(1)}초 제거)</span>
+            {doc.speeds.length > 0 && (
+              <label className="check">
+                <input type="checkbox" checked={applySpeed} onChange={(e) => { setApplySpeed(e.target.checked); if (!e.target.checked && video.current) video.current.playbackRate = 1; }} />
+                배속 적용해서 보기
+              </label>
+            )}
+            <span className="result">결과 길이 <b>{fmt(resultDuration)}</b> ({removed.toFixed(1)}초 제거{doc.speeds.length ? " · 배속 반영" : ""})</span>
           </div>
         </section>
         <Inspector
@@ -361,6 +396,8 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
           onPlayFrom={playFrom}
           onAddCut={addCut}
           onAddSub={addSub}
+          onAddSpeed={addSpeed}
+          requestNotes={project.request?.unsupported ?? []}
           onRedetect={redetect}
         />
       </div>

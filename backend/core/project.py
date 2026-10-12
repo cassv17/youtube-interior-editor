@@ -95,6 +95,7 @@ def build_project(paths: list[str | Path], params: silence.SilenceParams,
         "clip_analysis": analysis,
         "cuts": _renumber(cuts),
         "subtitles": [],
+        "speed_ranges": [],  # [{id, start, end, speed}] 타임라인 시간, 배속 구간
         "style": dict(DEFAULT_STYLE),
     }
 
@@ -137,7 +138,7 @@ def _check_groups(order: list[str], groups: list[dict]) -> list[dict]:
 
 
 def reorder(project: dict, order: list[str], groups: list[dict]) -> dict:
-    """클립 순서를 바꾼다. 각 클립의 컷·자막은 클립과 함께 움직인다(세트 이동).
+    """클립 순서를 바꾼다. 각 클립의 컷·자막·배속 구간은 클립과 함께 움직인다(세트 이동).
 
     클립 경계를 넘는 직접 만든 컷은 클립별로 나누고, 경계를 넘는 자막은 시작한 클립 끝에서 자른다.
     """
@@ -157,6 +158,10 @@ def reorder(project: dict, order: list[str], groups: list[dict]) -> dict:
         pieces = list(local_spans(cut["start"], cut["end"]))
         for k, (cid, s, e) in enumerate(pieces):
             local_cuts.append((cid, s, e, {**cut, "id": cut["id"] if k == 0 else f"{cut['id']}-{k + 1}"}))
+    local_speeds = []
+    for r in project.get("speed_ranges", []):
+        for k, (cid, s, e) in enumerate(local_spans(r["start"], r["end"])):
+            local_speeds.append((cid, s, e, {**r, "id": r["id"] if k == 0 else f"{r['id']}-{k + 1}"}))
     local_subs = []
     for sub in project["subtitles"]:
         # 자막이 기록해 둔 소속 클립을 우선 쓴다(경계에 딱 붙은 자막이 옆 클립으로 판정되는 것 방지)
@@ -179,6 +184,9 @@ def reorder(project: dict, order: list[str], groups: list[dict]) -> dict:
     project["clips"] = new_clips
     project["cuts"] = sorted(({**cut, "clip_id": cid, "start": round(off[cid] + s, 3), "end": round(off[cid] + e, 3)}
                               for cid, s, e, cut in local_cuts), key=lambda c: c["start"])
+    project["speed_ranges"] = sorted(
+        ({**r, "start": round(off[cid] + s, 3), "end": round(off[cid] + e, 3)} for cid, s, e, r in local_speeds),
+        key=lambda r: r["start"])
     subs = []
     for cid, s, e, sub in local_subs:
         delta = off[cid] + s - sub["start"]

@@ -28,9 +28,10 @@ class SubtitleParams:
     max_chars: int = 25      # 한 줄 최대 글자 수(공백 포함). 참고 영상은 하단 한 줄 자막
     max_gap: float = 0.6     # 단어 사이가 이만큼 벌어지면 자막을 끊는다
     min_duration: float = 0.7  # 자막 최소 표시 시간(다음 자막과 겹치지 않는 범위에서 늘림)
+    terms: tuple[str, ...] = ()  # 정확히 인식되어야 하는 고유명사·전문용어(음성인식 힌트로만 쓰임)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return {**asdict(self), "terms": list(self.terms)}
 
 
 _model = None
@@ -48,13 +49,14 @@ def load_model():
     return _model
 
 
-def transcribe_clip(path: str, duration: float, progress=None) -> list[dict]:
+def transcribe_clip(path: str, duration: float, progress=None, terms: tuple[str, ...] = ()) -> list[dict]:
     """클립 하나를 인식해 문장(segment) 목록을 돌려준다. 시간은 클립 기준."""
     model = load_model()
     segments, _info = model.transcribe(
         path, language="ko", word_timestamps=True, beam_size=5,
         vad_filter=True, vad_parameters={"min_silence_duration_ms": 500},
         condition_on_previous_text=False,  # 앞 문장을 따라 같은 말을 반복하는 오류 방지
+        initial_prompt=(", ".join(terms) + "." if terms else None),
     )
     result = []
     for seg in segments:  # 제너레이터: 도는 동안 실제 인식이 진행된다
@@ -132,7 +134,7 @@ def transcribe_project(project: dict, params: SubtitleParams, progress=None) -> 
             continue
         cb = (lambda f, c=clip: progress((c["offset"] + f * c["duration"]) / total, c["name"])) \
             if progress else None
-        segments = transcribe_clip(clip["path"], clip["duration"], cb)
+        segments = transcribe_clip(clip["path"], clip["duration"], cb, params.terms)
         for b in split_blocks(segments, params):
             off = clip["offset"]
             subs.append({

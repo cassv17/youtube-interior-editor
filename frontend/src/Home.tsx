@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, uploadFiles, type ProjectSummary, type ReferenceResult } from "./api";
+import { api, uploadFiles, type ProjectSummary, type ReferenceResult, type RequestPayload, type RequestResult } from "./api";
 import { fmt } from "./time";
 
 const STATUS: Record<ProjectSummary["status"], string> = {
@@ -9,6 +9,14 @@ const STATUS: Record<ProjectSummary["status"], string> = {
   failed: "실패/중단",
   completed: "완료",
 };
+
+const EXAMPLES = [
+  { label: "목적·길이", text: "유튜브 롱폼 10분 이내, 시공 전후 비교가 핵심인 영상이야." },
+  { label: "컷 강도", text: "말 사이 쉬는 구간은 바짝 자르고 템포 빠르게 편집해줘." },
+  { label: "자막 스타일", text: "자막은 화면 위쪽에 노란색으로, 한 줄 20자 이내로 해줘." },
+  { label: "용어 표기", text: "'히노끼', '아트월', '간접조명'은 정확히 표기해줘." },
+  { label: "전체 배속", text: "전체를 1.2배속으로 해줘." },
+];
 
 export default function Home({ onOpen }: { onOpen: (id: string) => void }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -20,6 +28,10 @@ export default function Home({ onOpen }: { onOpen: (id: string) => void }) {
   const [refBusy, setRefBusy] = useState(false);
   const [useRhythm, setUseRhythm] = useState(true);
   const [useStyle, setUseStyle] = useState(true);
+  const [reqText, setReqText] = useState("");
+  const [reqResult, setReqResult] = useState<RequestResult | null>(null);
+  const [reqBusy, setReqBusy] = useState(false);
+  const [reqUse, setReqUse] = useState(true);
 
   useEffect(() => {
     api.list().then(setProjects).catch((e) => setErr(e.message));
@@ -64,13 +76,49 @@ export default function Home({ onOpen }: { onOpen: (id: string) => void }) {
     }
   };
 
+  const editReq = (text: string) => {
+    setReqText(text);
+    setReqResult(null); // 글이 바뀌면 이전 해석 결과는 더 이상 맞지 않는다
+  };
+
+  const interpret = async (): Promise<RequestResult | null> => {
+    setErr("");
+    setReqBusy(true);
+    try {
+      const r = await api.interpretRequest(reqText);
+      setReqResult(r);
+      setReqUse(true);
+      return r;
+    } catch (e) {
+      setErr((e as Error).message);
+      return null;
+    } finally {
+      setReqBusy(false);
+    }
+  };
+
   const start = async () => {
     setErr("");
+    let req = reqResult;
+    if (reqText.trim() && !req) {
+      req = await interpret(); // 해석 결과를 아직 안 봤으면 시작 전에 해석한다
+      if (!req) return;
+    }
     setUpload(0);
     try {
       const p = await uploadFiles(files, setUpload);
       const rhythm = ref && useRhythm && ref.rhythm.ok ? ref.rhythm.silence : undefined;
       const style = ref && useStyle && ref.subtitle.ok ? ref.subtitle.style : undefined;
+      const useReq = !!(req && req.available && reqUse);
+      const request: RequestPayload | undefined = reqText.trim()
+        ? {
+            text: reqText.trim(),
+            ...(useReq
+              ? { silence: req!.silence, subtitle: req!.subtitle, style: req!.style, speed_all: req!.speed_all, terms: req!.terms, unsupported: req!.unsupported }
+              : {}),
+          }
+        : undefined;
+      const sil = (useReq && req!.silence) || rhythm;
       const parts = [rhythm && "편집 리듬", style && "자막 스타일"].filter(Boolean);
       const note = ref && parts.length
         ? { name: ref.name, rhythm_applied: !!rhythm, style_applied: !!style, summary: `${parts.join("·")} 적용` }
@@ -78,8 +126,8 @@ export default function Home({ onOpen }: { onOpen: (id: string) => void }) {
       await api.start(
         p.id,
         p.sources.map((s) => s.sid),
-        { threshold: "auto", min_silence: rhythm?.min_silence ?? 0.6, pad: rhythm?.pad ?? 0.15 },
-        { style, reference: note },
+        { threshold: "auto", min_silence: sil?.min_silence ?? 0.6, pad: sil?.pad ?? 0.15 },
+        { style, reference: note, request },
       );
       onOpen(p.id);
     } catch (e) {
@@ -109,6 +157,65 @@ export default function Home({ onOpen }: { onOpen: (id: string) => void }) {
           <span>영상 파일을 여기로 끌어오거나 <u>클릭해서 선택</u>하세요 (여러 개 가능)</span>
           <small>원본 파일은 수정되지 않습니다. 작업용 사본이 workspace 폴더에 저장됩니다.</small>
         </label>
+
+        <div className="req-box">
+          <h3>편집 요청사항 <small className="hint">(선택)</small></h3>
+          <p className="hint">
+            원하는 편집 방향을 적으면 자동 초안을 그에 맞춰 만듭니다. AI에는 <b>이 요청 글만</b> 전달되고, 영상·음성·자막 내용은 전달되지 않습니다.
+          </p>
+          <div className="chips">
+            {EXAMPLES.map((ex) => (
+              <button key={ex.label} className="chip" disabled={upload !== null || reqBusy}
+                onClick={() => editReq(reqText.includes(ex.text) ? reqText : (reqText ? reqText + "\n" : "") + ex.text)}
+                title={ex.text}>
+                <b>＋</b>{ex.label}
+              </button>
+            ))}
+          </div>
+          <textarea
+            value={reqText}
+            maxLength={2000}
+            disabled={upload !== null || reqBusy}
+            placeholder={"예) 유튜브 롱폼 10분 이내, 시공 전후 비교가 핵심이야.\n말 사이 쉬는 구간은 바짝 자르고, 자막은 위쪽에 노란색으로 한 줄 20자 이내로 해줘.\n'히노끼', '아트월'은 정확히 표기해줘."}
+            onChange={(e) => editReq(e.target.value)}
+          />
+          <div className="req-count">{reqText.length} / 2000자</div>
+          <p className="hint">
+            ※ <b>무엇을</b>(컷 강도·자막 위치/색/글자 수·전체 배속·자주 쓰는 용어)을 구체적으로 적을수록 잘 맞습니다.
+            "인트로 인사 빼줘", "이 장면만 1.5배속"처럼 <b>영상 내용이나 특정 구간</b>을 가리키는 요청은 자동으로 적용되지 않습니다. 편집 화면 타임라인에서 직접 컷·배속 구간을 지정해 주세요.
+          </p>
+          <div className="row">
+            <button onClick={() => interpret()} disabled={!reqText.trim() || reqBusy || upload !== null}>
+              {reqBusy ? "요청을 해석하는 중… (약 30초)" : "요청 반영 확인"}
+            </button>
+          </div>
+          {reqResult && (
+            <div className="req-result">
+              {!reqResult.available ? (
+                <p className="hint">{reqResult.note}</p>
+              ) : (
+                <>
+                  <b>적용되는 설정</b>
+                  {reqResult.applied.length ? (
+                    <ul>{reqResult.applied.map((a) => <li key={a}>{a}</li>)}</ul>
+                  ) : (
+                    <p className="none">자동으로 적용할 수 있는 설정을 찾지 못했습니다.</p>
+                  )}
+                  {reqResult.unsupported.length > 0 && (
+                    <>
+                      <b>자동 적용하지 못하는 요청 (편집 화면에서 직접 해 주세요)</b>
+                      <ul>{reqResult.unsupported.map((a) => <li key={a}>{a}</li>)}</ul>
+                    </>
+                  )}
+                  <label className="check">
+                    <input type="checkbox" checked={reqUse} disabled={upload !== null} onChange={(e) => setReqUse(e.target.checked)} />
+                    이 설정으로 분석하기 (레퍼런스와 겹치면 요청사항이 우선)
+                  </label>
+                </>
+              )}
+            </div>
+          )}
+        </div>
 
         {files.length > 0 && (
           <>

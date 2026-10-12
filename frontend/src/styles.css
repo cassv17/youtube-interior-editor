@@ -212,3 +212,27 @@ ul.files a:hover { text-decoration: underline; }
 .ref-name { font-weight: 600; margin-bottom: 6px; }
 .ref-name button { margin-left: 8px; }
 .swatch { display: inline-block; width: 12px; height: 12px; border: 1px solid var(--line); border-radius: 2px; vertical-align: -1px; }
+
+/* 배속 구간 */
+.tl-speed { position: absolute; left: 0; right: 0; border-bottom: 1px solid var(--line); cursor: crosshair; }
+.speed {
+  position: absolute; top: 3px; bottom: 3px; background: rgba(79, 140, 255, 0.35); border: 1px solid #4f8cff; border-radius: 4px;
+  font-size: 11px; font-weight: 600; padding: 0 5px; overflow: hidden; white-space: nowrap; cursor: grab; display: flex; align-items: center;
+}
+.speed.slow { background: rgba(192, 132, 255, 0.35); border-color: #c084ff; }
+.speed.sel { outline: 2px solid #fff; outline-offset: -2px; z-index: 2; }
+.speed span { pointer-events: none; }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.presets button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.speed-list li { cursor: pointer; display: flex; gap: 8px; padding: 4px 0; }
+.speed-flag { background: #4f8cff; }
+
+/* 요청사항 */
+.req-box textarea { width: 100%; min-height: 96px; resize: vertical; box-sizing: border-box; }
+.req-count { text-align: right; color: var(--muted); font-size: 12px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.chip { font-size: 12px; padding: 4px 9px; border-radius: 999px; }
+.chip b { margin-right: 4px; }
+.req-result { margin-top: 10px; line-height: 1.6; }
+.req-result ul { margin: 4px 0 8px; padding-left: 20px; }
+.req-result .none { color: var(--warn); }

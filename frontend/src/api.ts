@@ -101,6 +101,33 @@ export interface Group {
   clips: string[];
 }
 
+export interface SpeedRange {
+  id: string;
+  start: number;
+  end: number;
+  speed: number;
+}
+
+export interface RequestResult {
+  available: boolean;
+  note: string;
+  silence: { min_silence: number; pad: number } | null;
+  subtitle: { max_chars: number } | null;
+  style: Partial<Pick<Style, "position" | "margin" | "size" | "color" | "outline_color">> | null;
+  speed_all: number | null;
+  terms: string[];
+  unsupported: string[];
+  applied: string[];
+}
+
+export type RequestPayload = { text: string } & Partial<Omit<RequestResult, "available" | "note" | "applied">>;
+
+export interface RequestNote {
+  text: string;
+  applied: string[];
+  unsupported: string[];
+}
+
 export interface ReferenceRhythm {
   ok: boolean;
   note: string;
@@ -154,6 +181,8 @@ export interface Project {
   export_job?: ExportJob | null;
   exports?: ExportResult[];
   groups?: Group[];
+  speed_ranges?: SpeedRange[];
+  request?: RequestNote;
   reference?: ReferenceNote;
   proxy?: string;
   // 완료된 작업(편집 기록은 지워지고 결과 정보만 남음)
@@ -199,14 +228,16 @@ const json = (method: string, body: unknown): RequestInit => ({
 export const api = {
   list: () => request<ProjectSummary[]>("/api/projects"),
   get: (id: string) => request<Project>(`/api/projects/${id}`),
-  start: (id: string, order: string[], silence: SilenceParams, extra?: { style?: Partial<Style>; reference?: ReferenceNote }) =>
+  start: (id: string, order: string[], silence: SilenceParams, extra?: { style?: Partial<Style>; reference?: ReferenceNote; request?: RequestPayload }) =>
     request<{ ok: boolean }>(`/api/projects/${id}/start`, json("POST", { order, silence, ...extra })),
+  interpretRequest: (text: string) =>
+    request<RequestResult>("/api/request/interpret", json("POST", { text })),
   analyzeReference: (file: File) => {
     const form = new FormData();
     form.append("file", file, file.name);
     return request<ReferenceResult>("/api/reference", { method: "POST", body: form });
   },
-  saveEdits: (id: string, edits: { cuts: Cut[]; subtitles: Subtitle[]; style: Style }) =>
+  saveEdits: (id: string, edits: { cuts: Cut[]; subtitles: Subtitle[]; speeds: SpeedRange[]; style: Style }) =>
     request<{ ok: boolean; updated: string }>(`/api/projects/${id}/edits`, json("PUT", edits)),
   redetect: (id: string, params: SilenceParams) =>
     request<Project>(`/api/projects/${id}/redetect`, json("POST", params)),

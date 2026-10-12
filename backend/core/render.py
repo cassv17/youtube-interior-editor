@@ -52,6 +52,28 @@ def video_encode_args() -> list[str]:
     return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
 
 
+def atempo_chain(speed: float) -> str:
+    """ffmpeg atempo는 한 번에 0.5~2배까지만 되므로 2배를 넘으면 나눠서 건다."""
+    factors = [2.0, speed / 2] if speed > 2 else [speed]
+    return ",".join(f"atempo={f:.6f}" for f in factors)
+
+
+def _retime_expr(pieces: list[tuple[float, float, float]], fps: int) -> str:
+    """select를 거친 프레임 번호(N) → 배속을 반영한 시각(초). 조각마다 기울기가 다른 구간별 직선이다."""
+    starts, base, n_total = [], [], 0
+    out_t = 0.0
+    for s, e, sp in pieces:
+        n = round((e - s) * fps)
+        starts.append(n_total)
+        base.append(out_t)
+        n_total += n
+        out_t += n / (fps * sp)
+    expr = f"{base[-1]:.9f}+(N-{starts[-1]})/({fps}*{pieces[-1][2]:.6f})"
+    for i in range(len(pieces) - 2, -1, -1):
+        expr = f"if(lt(N,{starts[i + 1]}),{base[i]:.9f}+(N-{starts[i]})/({fps}*{pieces[i][2]:.6f}),{expr})"
+    return expr
+
+
 def even(n: float) -> int:
     return max(2, int(round(n / 2)) * 2)
 
@@ -73,7 +95,9 @@ def build_inputs_and_graph(project: dict, segments: dict[str, list[tuple[float, 
                            w: int, h: int, video_filter: str = "") -> tuple[list[str], str, float]:
     """ffmpeg 입력 인자, filter_complex 문자열, 결과 길이(초)를 만든다.
 
-    segments: {clip_id: [(시작, 끝), ...]} 클립 기준 시간의 '남길' 구간. None이면 클립 전체.
+    segments: {clip_id: [(시작, 끝) 또는 (시작, 끝, 배속), ...]} 클립 기준 시간의 '남길' 구간. None이면 클립 전체.
+    배속이 1이 아닌 조각이 있는 클립은 그 클립만 배속 경로로 만든다(영상은 프레임을 골라 시각을 다시 매기고,
+    음성은 atempo). 클립 길이는 영상 프레임 수에 맞춰 음성을 자른다.
     구간 경계는 1/fps 단위로 맞춰져 있어야 영상 프레임 수와 음성 길이가 정확히 일치한다.
     """
     fps = project["output"]["fps"]
@@ -83,8 +107,11 @@ def build_inputs_and_graph(project: dict, segments: dict[str, list[tuple[float, 
     total = 0.0
     n_in = 0
     for k, clip in enumerate(project["clips"]):
-        segs = [(0.0, clip["duration"])] if segments is None else segments.get(clip["id"], [])
-        segs = [(s, e) for s, e in segs if e - s >= 1 / fps - 1e-6]
+        raw = [(0.0, clip["duration"])] if segments is None else segments.get(clip["id"], [])
+        trip = [(x[0], x[1], x[2] if len(x) > 2 else 1.0) for x in raw]
+        trip = [(s, e, sp) for s, e, sp in trip if e - s >= 1 / fps - 1e-6]
+        segs = [(s, e) for s, e, _ in trip]
+        retimed = any(abs(sp - 1.0) > 1e-6 for _, _, sp in trip)
         if not segs:
             continue
         args += ["-i", clip["path"]]
@@ -98,7 +125,7 @@ def build_inputs_and_graph(project: dict, segments: dict[str, list[tuple[float, 
             ai = f"{n_in}:a"
             n_in += 1
 
-        whole = segments is None or segs == [(0.0, clip["duration"])]
+        whole = not retimed and (segments is None or segs == [(0.0, clip["duration"])])
         v = _video_chain(f"{vi}:v:0", clip, w, h, fps)
         a = _audio_chain(ai, clip)
         if whole:
@@ -110,18 +137,27 @@ def build_inputs_and_graph(project: dict, segments: dict[str, list[tuple[float, 
             # 양쪽 기준을 반 프레임 앞당긴다 → 구간마다 정확히 (e-s)*fps 프레임.
             half = 1 / fps / 2
             expr = "+".join(f"between(t,{s - half:.6f},{e - half:.6f})" for s, e in segs)
-            parts.append(f"{v},select='{expr}',setpts=N/{fps}/TB[v{k}]")
-            # 음성: 구간별로 잘라 이음새마다 짧게 페이드
+            if retimed:
+                # 고른 프레임에 배속을 반영한 시각을 다시 매기고 30fps로 맞춘다(빠르면 솎고 느리면 겹친다).
+                out_sec = sum(round((e - s) * fps) / (fps * sp) for s, e, sp in trip)
+                frames = round(out_sec * fps)
+                parts.append(f"{v},select='{expr}',setpts='({_retime_expr(trip, fps)})/TB',fps={fps},"
+                             f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=N/{fps}/TB[v{k}]")
+            else:
+                parts.append(f"{v},select='{expr}',setpts=N/{fps}/TB[v{k}]")
+            # 음성: 구간별로 잘라 이음새마다 짧게 페이드(배속 조각은 atempo)
             parts.append(f"{a},asplit={len(segs)}" + "".join(f"[a{k}_{j}]" for j in range(len(segs))))
-            for j, (s, e) in enumerate(segs):
+            for j, (s, e, sp) in enumerate(trip):
                 d = e - s
                 fade = min(FADE, d / 4)
+                tempo = f",{atempo_chain(sp)}" if abs(sp - 1.0) > 1e-6 else ""
                 parts.append(f"[a{k}_{j}]atrim={s:.6f}:{e:.6f},asetpts=PTS-STARTPTS,"
-                             f"afade=t=in:d={fade:.4f},afade=t=out:st={d - fade:.6f}:d={fade:.4f}[a{k}s{j}]")
+                             f"afade=t=in:d={fade:.4f},afade=t=out:st={d - fade:.6f}:d={fade:.4f}{tempo}[a{k}s{j}]")
+            fit = f",apad,atrim=duration={frames / fps:.6f},asetpts=PTS-STARTPTS" if retimed else ""
             parts.append("".join(f"[a{k}s{j}]" for j in range(len(segs)))
-                         + f"concat=n={len(segs)}:v=0:a=1[a{k}]")
+                         + f"concat=n={len(segs)}:v=0:a=1{fit}[a{k}]")
         outs.append(k)
-        total += sum(e - s for s, e in segs)
+        total += frames / fps if retimed else sum(e - s for s, e in segs)
 
     if not outs:
         raise MediaError("남길 구간이 없습니다. 컷이 영상 전체를 덮고 있습니다.")

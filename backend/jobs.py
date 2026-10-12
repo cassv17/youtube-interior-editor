@@ -18,7 +18,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from .core import export as export_mod, media, project as proj_mod, reference, render, silence
+from .core import export as export_mod, media, project as proj_mod, reference, render, request_ai, silence, stt
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECTS_DIR = ROOT / "workspace" / "projects"
@@ -123,6 +123,28 @@ def analyze_reference(name: str, fobj) -> dict:
     return result
 
 
+def interpret_request(text: str) -> dict:
+    """요청 글을 편집 설정으로 해석한다. AI에는 글만 보내고, 사용할 수 없는 환경이면 available=False."""
+    if not request_ai.claude_path():
+        return {"available": False, "silence": None, "subtitle": None, "style": None, "speed_all": None,
+                "terms": [], "unsupported": [], "applied": [],
+                "note": "요청 해석에는 Claude Code(claude 명령)가 필요합니다. 요청 글은 프로젝트에 메모로만 저장됩니다."}
+    return {"available": True, "note": "", **request_ai.interpret(text)}
+
+
+def clean_request(req: dict | None) -> dict:
+    """화면에서 넘어온 요청 해석 결과 중 허용된 항목만 걸러 낸다."""
+    req = req or {}
+    out: dict = {"text": str(req.get("text", "")).strip()[:2000]}
+    try:
+        out.update(request_ai.parse(json.dumps({k: req.get(k) for k in ("silence", "subtitle", "style", "speed_all", "terms")})))
+    except request_ai.RequestAIError:
+        pass
+    out.pop("unsupported", None)
+    out["unsupported"] = [str(u)[:120] for u in (req.get("unsupported") or [])][:10] if isinstance(req.get("unsupported"), list) else []
+    return out
+
+
 def clean_style(style: dict | None) -> dict:
     """화면에서 넘어온 자막 스타일 중 허용된 항목만 걸러 낸다(잘못된 값은 버린다)."""
     s = style or {}
@@ -151,7 +173,8 @@ def _set(pid: str, **kw) -> None:
 
 
 def start_analysis(pid: str, order: list[str], params: silence.SilenceParams,
-                   style: dict | None = None, ref: dict | None = None) -> None:
+                   style: dict | None = None, ref: dict | None = None,
+                   request: dict | None = None) -> None:
     with lock(pid):
         data = load(pid)
         if data["status"] == "analyzing" and pid in _status:
@@ -161,7 +184,12 @@ def start_analysis(pid: str, order: list[str], params: silence.SilenceParams,
             raise ValueError("클립 순서 정보가 올바르지 않습니다.")
         data["order"] = order
         data["pending_params"] = params.to_dict()
-        data["pending_style"] = clean_style(style)
+        req = clean_request(request)
+        # 요청사항이 레퍼런스보다 우선한다
+        data["pending_style"] = {**clean_style(style), **(req.get("style") or {})}
+        data["pending_request"] = req
+        if req["text"]:
+            data["request"] = {"text": req["text"], "applied": req.get("applied", []), "unsupported": req["unsupported"]}
         if ref:
             data["reference"] = {k: ref[k] for k in ("name", "rhythm_applied", "style_applied", "summary") if k in ref}
         data["status"] = "analyzing"
@@ -190,6 +218,7 @@ def _run(pid: str) -> None:
     original_name = {by_sid[sid]["path"]: by_sid[sid]["name"] for sid in data["order"]}
     params = silence.SilenceParams(**data["pending_params"])
     pending_style = data.get("pending_style") or {}
+    req = data.get("pending_request") or {}
 
     # 1) 음량 측정 + 무음 컷 (빠름)
     cache = load_levels(pid)
@@ -210,11 +239,14 @@ def _run(pid: str) -> None:
     # 3) 음성인식 (가장 오래 걸림)
     _set(pid, stage="음성인식 중 (모델 불러오는 중)", progress=0.0, detail="")
     stt.transcribe_project(
-        built, stt.SubtitleParams(),
+        built, stt.SubtitleParams(**(req.get("subtitle") or {}), terms=tuple(req.get("terms") or ())),
         progress=lambda f, name: _set(pid, stage="음성인식 중", progress=f, detail=name))
 
+    if req.get("speed_all"):  # 요청한 전체 배속을 영상 전체 구간 하나로 둔다(편집 화면에서 고칠 수 있다)
+        built["speed_ranges"] = [{"id": "speed-all", "start": 0.0, "end": built["duration"],
+                                  "speed": req["speed_all"]}]
     with lock(pid):
-        keep = {k: data[k] for k in ("id", "name", "created", "sources", "order", "exports", "reference") if k in data}
+        keep = {k: data[k] for k in ("id", "name", "created", "sources", "order", "exports", "reference", "request") if k in data}
         save(pid, {**built, **keep, "status": "ready"})
     _set(pid, stage="완료", progress=1.0, detail="")
 
@@ -444,6 +476,20 @@ def _owner(data: dict, item: dict, start: float) -> str:
     return proj_mod.clip_at(data, start)["id"]
 
 
+def clean_speeds(items, dur: float) -> list[dict]:
+    """배속 구간 검증: 범위·배속을 제한하고, 겹치면 뒤 구간을 앞 구간 끝으로 밀며, 1배속과 너무 짧은 구간은 버린다."""
+    out: list[dict] = []
+    for r in sorted((r for r in items if isinstance(r, dict)), key=lambda r: float(r.get("start", 0))):
+        s, e = _num(r["start"], 0, dur), _num(r["end"], 0, dur)
+        sp = _num(r["speed"], export_mod.MIN_SPEED, export_mod.MAX_SPEED)
+        if out:
+            s = max(s, out[-1]["end"])
+        if e - s < 0.1 or abs(sp - 1.0) < 1e-6:
+            continue
+        out.append({"id": str(r.get("id") or f"speed-{len(out) + 1}"), "start": s, "end": e, "speed": sp})
+    return out
+
+
 def apply_edits(pid: str, body: dict) -> dict:
     """화면에서 보낸 컷·자막·스타일을 검증해 저장한다."""
     with lock(pid):
@@ -474,6 +520,8 @@ def apply_edits(pid: str, body: dict) -> dict:
                              "clip_id": _owner(data, s, st),
                              "words": list(s.get("words", []))})
             data["subtitles"] = sorted(subs, key=lambda s: s["start"])
+        if "speeds" in body:
+            data["speed_ranges"] = clean_speeds(body["speeds"], dur)
         if "style" in body:
             data["style"] = {k: body["style"].get(k, v) for k, v in proj_mod.DEFAULT_STYLE.items()}
         save(pid, data)

@@ -3,6 +3,7 @@
 - 적용(enabled) 컷을 합친 뒤 1/30초 격자에 맞춘다. 미리보기와 같은 격자라 프레임 수와 음성 길이가 정확히 맞는다.
 - 자막 시간 변환: 결과 시간 = 원래 시간 - (그 앞에서 잘린 시간의 합).
   컷 안에 완전히 들어간 자막은 빠지고, 컷에 걸친 자막은 잘린 만큼 짧아진다.
+- 구간 배속(speed_ranges): 결과 시간 = 컷으로 남은 구간을 (길이 ÷ 배속)으로 더한 값. 자막 시간도 같은 식으로 옮긴다.
 - 원본은 읽기만 하고, 결과는 output 폴더에 새 파일로 만든다(기존 파일 덮어쓰기 없음).
 """
 import re
@@ -13,6 +14,7 @@ from pathlib import Path
 from . import nle, render
 from .media import MediaError
 
+MIN_SPEED, MAX_SPEED = 0.5, 4.0
 MIN_SUB = 0.2  # 컷 반영 후 이보다 짧아진 자막은 뺀다(읽을 수 없는 길이)
 # ASS(libass)의 Fontsize는 글자 크기(em)가 아니라 줄 높이(winAscent+winDescent) 기준이다.
 # 맑은 고딕(malgun.ttf)은 (2229+495)/2048 = 1.33. 이 비율을 곱해야 미리보기(CSS font-size)와 같은 크기가 된다.
@@ -63,24 +65,87 @@ def keep_segments(project: dict, cuts: list[tuple[float, float]]) -> dict[str, l
     return result
 
 
-def map_time(t: float, cuts: list[tuple[float, float]]) -> float:
-    """타임라인 시간 → 결과 영상 시간. 컷 안의 시간은 그 컷이 시작되던 자리로 간다."""
-    removed = 0.0
-    for s, e in cuts:
-        if t >= e:
-            removed += e - s
-        elif t > s:
-            removed += t - s
-            break
-        else:
-            break
-    return t - removed
+def merged_speeds(project: dict) -> list[tuple[float, float, float]]:
+    """배속 구간(타임라인 시간)을 프레임 격자에 맞추고 겹침을 없앤 목록. 1배속은 뺀다."""
+    fps = project["output"]["fps"]
+    spans = []
+    for r in project.get("speed_ranges", []):
+        try:
+            sp = min(max(float(r["speed"]), MIN_SPEED), MAX_SPEED)
+            s, e = _grid(float(r["start"]), fps), _grid(float(r["end"]), fps)
+        except (KeyError, TypeError, ValueError):
+            continue
+        spans.append((max(0.0, s), min(project["duration"], e), sp))
+    out: list[tuple[float, float, float]] = []
+    for s, e, sp in sorted(spans):
+        if out:
+            s = max(s, out[-1][1])  # 겹치면 뒤 구간을 앞 구간 끝에서 시작
+        if e - s < 1 / fps - 1e-6 or abs(sp - 1.0) < 1e-6:
+            continue
+        out.append((s, e, sp))
+    return out
 
 
-def remap_subtitles(project: dict, cuts: list[tuple[float, float]]) -> list[dict]:
+def keep_pieces(project: dict, cuts: list[tuple[float, float]],
+                speeds: list[tuple[float, float, float]]) -> dict[str, list[tuple[float, float, float]]]:
+    """클립별 '남길 구간'을 배속 경계에서 나눈 (시작, 끝, 배속) 목록(클립 기준 시간)."""
+    fps = project["output"]["fps"]
+    offsets = {c["id"]: _grid(c["offset"], fps) for c in project["clips"]}
+    result = {}
+    for cid, segs in keep_segments(project, cuts).items():
+        c0 = offsets[cid]
+        pieces = []
+        for s, e in segs:
+            cur = s
+            for rs, re_, sp in speeds:
+                rs, re_ = rs - c0, re_ - c0
+                if re_ <= cur + 1e-6 or rs >= e - 1e-6:
+                    continue
+                if rs > cur + 1e-6:
+                    pieces.append((cur, rs, 1.0))
+                lo, hi = max(cur, rs), min(e, re_)
+                pieces.append((lo, hi, sp))
+                cur = hi
+            if e - cur > 1e-6:
+                pieces.append((cur, e, 1.0))
+        result[cid] = [(round(s, 6), round(e, 6), sp) for s, e, sp in pieces if e - s > 1e-6]
+    return result
+
+
+def map_time(t: float, cuts: list[tuple[float, float]],
+             speeds: list[tuple[float, float, float]] | None = None) -> float:
+    """타임라인 시간 → 결과 영상 시간. 컷 안의 시간은 그 컷이 시작되던 자리로 간다.
+    배속 구간에서는 시간이 (길이 ÷ 배속)만큼만 흐른다."""
+    if not speeds:
+        removed = 0.0
+        for s, e in cuts:
+            if t >= e:
+                removed += e - s
+            elif t > s:
+                removed += t - s
+                break
+            else:
+                break
+        return t - removed
+    # 경계: 컷 시작/끝, 배속 시작/끝으로 나눈 조각마다 (배속, 컷 여부)가 일정하다
+    marks = sorted({0.0, t, *[x for s, e in cuts for x in (s, e)], *[x for s, e, _ in speeds for x in (s, e)]})
+    out = 0.0
+    for a, b in zip(marks, marks[1:]):
+        if b > t + 1e-9:
+            break
+        mid = (a + b) / 2
+        if any(s <= mid < e for s, e in cuts):
+            continue
+        sp = next((r[2] for r in speeds if r[0] <= mid < r[1]), 1.0)
+        out += (b - a) / sp
+    return out
+
+
+def remap_subtitles(project: dict, cuts: list[tuple[float, float]],
+                    speeds: list[tuple[float, float, float]] | None = None) -> list[dict]:
     out = []
     for sub in sorted(project["subtitles"], key=lambda s: s["start"]):
-        s, e = map_time(sub["start"], cuts), map_time(sub["end"], cuts)
+        s, e = map_time(sub["start"], cuts, speeds), map_time(sub["end"], cuts, speeds)
         if e - s < MIN_SUB or not sub["text"].strip():
             continue
         if out and s < out[-1]["end"]:  # 컷 때문에 붙은 자막끼리 겹치지 않게
@@ -165,8 +230,9 @@ def encode(project: dict, mp4: Path, burn: bool, progress=None) -> float:
     드라이버 문제) CPU 인코더(libx264)로 자동 재시도하고, 이후 인코딩도 CPU로 전환한다.
     """
     cuts = merged_cuts(project)
-    segments = keep_segments(project, cuts)
-    subs = remap_subtitles(project, cuts)
+    speeds = merged_speeds(project)
+    segments = keep_pieces(project, cuts, speeds) if speeds else keep_segments(project, cuts)
+    subs = remap_subtitles(project, cuts, speeds)
     w, h = project["output"]["width"], project["output"]["height"]
     files = {}
     vf = ""
@@ -187,7 +253,7 @@ def encode(project: dict, mp4: Path, burn: bool, progress=None) -> float:
 
 
 def write_srt(project: dict, path: Path) -> int:
-    subs = remap_subtitles(project, merged_cuts(project))
+    subs = remap_subtitles(project, merged_cuts(project), merged_speeds(project))
     path.write_text(to_srt(subs), encoding="utf-8-sig")  # BOM: 윈도우 프로그램 한글 깨짐 방지
     return len(subs)
 
@@ -264,8 +330,9 @@ def prepare_media(project: dict, media_dir: Path, move: bool) -> dict[str, Path]
 
 def write_xml(project: dict, pkg: Path, media: dict[str, Path]) -> Path:
     cuts = merged_cuts(project)
+    speeds = merged_speeds(project)
     xml = pkg / f"{_safe(project.get('name', '영상'))}_프리미어_다빈치.xml"
-    xml.write_text(nle.to_xml(project, keep_segments(project, cuts), media, project.get("name", "영상")),
+    xml.write_text(nle.to_xml(project, keep_pieces(project, cuts, speeds), media, project.get("name", "영상")),
                    encoding="utf-8")
     return xml
 

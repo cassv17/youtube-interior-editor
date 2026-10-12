@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import jobs
-from .core import silence
+from .core import request_ai, silence
 from .core.media import MediaError
 
 DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
@@ -69,6 +69,15 @@ def analyze_reference(file: UploadFile):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/request/interpret")
+def interpret_request(body: dict):
+    """요청사항 글을 편집 설정으로 해석한다. AI에는 요청 글만 보내고 영상 내용은 보내지 않는다."""
+    try:
+        return jobs.interpret_request(str(body.get("text", "")))
+    except request_ai.RequestAIError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/projects/{pid}")
 def get_project(pid: str):
     data = _get(pid)
@@ -80,7 +89,8 @@ def start(pid: str, body: dict):
     _get(pid)
     try:
         jobs.start_analysis(pid, list(body.get("order", [])), _params(body.get("silence", {})),
-                            style=body.get("style"), ref=body.get("reference"))
+                            style=body.get("style"), ref=body.get("reference"),
+                            request=body.get("request"))
     except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
     return {"ok": True}

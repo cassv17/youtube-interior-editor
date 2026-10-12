@@ -3,6 +3,7 @@
 - 컷을 반영한 '남길 구간'마다 클립 조각(clipitem)을 하나씩 놓는다 → 프로그램에서 조각별로 다시 조정 가능.
 - 영상 트랙 1개 + 음성 트랙 2개(스테레오 좌/우). FCP7 XML의 일반적인 스테레오 표기 방식이다.
 - 자막은 XML에 넣지 않고 같은 폴더의 SRT로 제공한다(프리미어: 파일 > 가져오기로 SRT → 캡션 트랙).
+- 배속 구간은 조각마다 'Time Remap'(speed 값, 100=원래 속도) 효과를 붙인다. 조각의 시퀀스 길이는 (길이 ÷ 배속)이다.
 - 미디어 경로는 절대 경로(file://localhost/C:/...)로 적는다. 폴더를 옮기면 프로그램이 '미디어 다시 연결'을 묻는다.
 """
 from pathlib import Path
@@ -22,18 +23,36 @@ def _pathurl(p: Path) -> str:
     return "file://localhost/" + quote(p.resolve().as_posix(), safe="/:")
 
 
-def to_xml(project: dict, segments: dict[str, list[tuple[float, float]]], media: dict[str, Path],
+def _speed_filter(speed: float, mediatype: str) -> str:
+    def param(pid: str, value: str, extra: str = "") -> str:
+        return (f'<parameter authoringApp="PremierePro"><parameterid>{pid}</parameterid><name>{pid}</name>'
+                f"{extra}<value>{value}</value></parameter>")
+
+    return (
+        "<filter><effect><name>Time Remap</name><effectid>timeremap</effectid>"
+        f"<effectcategory>motion</effectcategory><effecttype>motion</effecttype><mediatype>{mediatype}</mediatype>"
+        + param("variablespeed", "0", "<valuemin>0</valuemin><valuemax>1</valuemax>")
+        + param("speed", f"{speed * 100:g}", "<valuemin>-100000</valuemin><valuemax>100000</valuemax>")
+        + param("reverse", "FALSE")
+        + param("frameblending", "FALSE")
+        + "</effect></filter>"
+    )
+
+
+def to_xml(project: dict, segments: dict[str, list[tuple]], media: dict[str, Path],
            name: str) -> str:
-    """segments: {clip_id: [(클립 기준 시작, 끝)]}, media: {clip_id: 미디어 파일 경로}"""
+    """segments: {clip_id: [(클립 기준 시작, 끝) 또는 (시작, 끝, 배속)]}, media: {clip_id: 미디어 파일 경로}"""
     w, h = project["output"]["width"], project["output"]["height"]
-    items = []  # (clip, seg_start, seg_end, seq_in, seq_out)
+    items = []  # (clip, seg_start, seg_end, seq_in, seq_out, speed)
     pos = 0
     for clip in project["clips"]:
-        for s, e in segments.get(clip["id"], []):
-            n = round((e - s) * SEQ_FPS)
+        for seg in segments.get(clip["id"], []):
+            s, e = seg[0], seg[1]
+            speed = seg[2] if len(seg) > 2 else 1.0
+            n = round((e - s) / speed * SEQ_FPS)
             if n <= 0:
                 continue
-            items.append((clip, s, e, pos, pos + n))
+            items.append((clip, s, e, pos, pos + n, speed))
             pos += n
     total = pos
 
@@ -55,7 +74,7 @@ def to_xml(project: dict, segments: dict[str, list[tuple[float, float]]], media:
             f"<channelcount>2</channelcount></audio></media></file>"
         )
 
-    def clipitem(kind: str, idx: int, clip, s, e, a, b, track_index: int = 1) -> str:
+    def clipitem(kind: str, idx: int, clip, s, e, a, b, speed: float, track_index: int = 1) -> str:
         fps = clip.get("fps") or SEQ_FPS
         cid = f"{kind}-{idx + 1}" + (f"-{track_index}" if kind == "a" else "")
         src_in, src_out = round(s * fps), round(e * fps)
@@ -71,12 +90,14 @@ def to_xml(project: dict, segments: dict[str, list[tuple[float, float]]], media:
             f'<clipitem id="{cid}"><name>{escape(clip["name"])}</name><enabled>TRUE</enabled>'
             f"<duration>{round(clip.get('source_duration', clip['duration']) * fps)}</duration>{_rate(fps)}"
             f"<start>{a}</start><end>{b}</end><in>{src_in}</in><out>{src_out}</out>"
-            f"{file_el(clip)}{src}{links}</clipitem>"
+            f"{file_el(clip)}"
+            f"{_speed_filter(speed, 'audio' if kind == 'a' else 'video') if abs(speed - 1.0) > 1e-6 else ''}"
+            f"{src}{links}</clipitem>"
         )
 
-    video = "".join(clipitem("v", i, c, s, e, a, b) for i, (c, s, e, a, b) in enumerate(items))
+    video = "".join(clipitem("v", i, c, s, e, a, b, sp) for i, (c, s, e, a, b, sp) in enumerate(items))
     audio_tracks = "".join(
-        "<track>" + "".join(clipitem("a", i, c, s, e, a, b, ti) for i, (c, s, e, a, b) in enumerate(items))
+        "<track>" + "".join(clipitem("a", i, c, s, e, a, b, sp, ti) for i, (c, s, e, a, b, sp) in enumerate(items))
         + "</track>"
         for ti in (1, 2)
     )

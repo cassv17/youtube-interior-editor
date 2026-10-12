@@ -7,6 +7,7 @@ interface Props {
   style: Style;
   subtitle: Subtitle | null;
   inCut: boolean;
+  speed: number; // 지금 위치의 배속(1이면 표시 안 함)
   onClick: () => void;
 }
 
@@ -40,6 +41,7 @@ const VideoPreview = forwardRef<HTMLVideoElement, Props>(function VideoPreview(p
     <div className="video-box" ref={box} onClick={p.onClick}>
       <video ref={ref} src={p.src} preload="auto" playsInline />
       {p.inCut && <div className="cut-flag">✂ 잘릴 구간</div>}
+      {p.speed !== 1 && !p.inCut && <div className="cut-flag speed-flag">⏩ {p.speed}배속</div>}
       {p.subtitle && (
         <div
           className="sub-overlay"
