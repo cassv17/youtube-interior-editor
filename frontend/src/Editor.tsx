@@ -5,6 +5,7 @@ import Inspector, { type EditDoc } from "./Inspector";
 import Timeline, { newCut, newSub, type Doc, type Selection } from "./Timeline";
 import { useHistory } from "./useHistory";
 import VideoPreview from "./VideoPreview";
+import { adjacentCut, computePieces, edgeKind, reviveRange, type Piece } from "./pieces";
 import { clamp, fmt, outputTime, snap, uid } from "./time";
 
 type SaveState = "saved" | "pending" | "saving" | "error";
@@ -31,7 +32,7 @@ interface EditorProps {
 const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 
 export default function Editor({ project, onBack, onReload, onFinished }: EditorProps) {
-  const hist = useHistory<EditDoc>({ cuts: project.cuts, subtitles: project.subtitles, speeds: project.speed_ranges ?? [], style: project.style });
+  const hist = useHistory<EditDoc>({ cuts: project.cuts, subtitles: project.subtitles, speeds: project.speed_ranges ?? [], splits: project.splits ?? [], style: project.style });
   const doc = hist.present;
   const [meta, setMeta] = useState(project); // 클립 분석값·무음 설정 등 (재감지 시 갱신)
   const [wave, setWave] = useState<{ frame_sec: number; db: number[] } | null>(null);
@@ -55,6 +56,10 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
   const resultDuration = useMemo(
     () => outputTime(project.duration, cutsMerged, doc.speeds),
     [project.duration, cutsMerged, doc.speeds],
+  );
+  const pieces = useMemo(
+    () => computePieces(project.duration, doc.cuts, doc.splits, project.clips.slice(1).map((c) => c.offset)),
+    [project.duration, project.clips, doc.cuts, doc.splits],
   );
   const curSpeed = doc.speeds.find((r) => time >= r.start && time < r.end)?.speed ?? 1;
   const inCut = cutsMerged.find(([s, e]) => time >= s && time < e);
@@ -172,8 +177,45 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
     [hist.set],
   );
 
+  const deletePiece = useCallback((pc: Piece) => {
+    const id = uid("cut");
+    hist.set((d) => ({ ...d, cuts: [...d.cuts, newCut(id, pc.start, pc.end)] }));
+    setSelection(null);
+  }, [hist.set]);
+
+  const splitAtPlayhead = () => {
+    const t = snap(video.current?.currentTime ?? time);
+    const f = 1 / 30 - 1e-4;
+    const inside = pieces.find((pc) => t - pc.start >= f && pc.end - t >= f);
+    if (!inside) {
+      alert("이 위치에서는 나눌 수 없습니다. 잘릴 구간이거나 조각 가장자리에서 1프레임 이내입니다. 남는 구간 안으로 재생 위치를 옮긴 뒤 다시 눌러 주세요.");
+      return;
+    }
+    hist.set((d) => ({ ...d, splits: [...d.splits, t].sort((a, b) => a - b) }));
+    setSelection({ kind: "piece", id: inside.id });
+  };
+  const splitRef = useRef(splitAtPlayhead);
+  splitRef.current = splitAtPlayhead;
+
+  const rejoin = (pc: Piece, side: "l" | "r") => {
+    const kind = edgeKind(side, pc, doc.cuts, doc.splits);
+    const edge = side === "l" ? pc.start : pc.end;
+    if (kind === "split") {
+      hist.set((d) => ({ ...d, splits: d.splits.filter((s) => Math.abs(s - edge) > 1e-4) }));
+    } else if (kind === "cut") {
+      const r = adjacentCut(side, pc, doc.cuts);
+      if (r) hist.set((d) => ({ ...d, cuts: reviveRange(d.cuts, r[0], r[1], () => uid("cut")) }));
+    }
+    setSelection(null);
+  };
+
   const deleteSelected = useCallback(() => {
     if (!selection) return;
+    if (selection.kind === "piece") {
+      const pc = pieces.find((x) => x.id === selection.id);
+      if (pc) deletePiece(pc);
+      return;
+    }
     hist.set((d) =>
       selection.kind === "cut"
         ? { ...d, cuts: d.cuts.filter((c) => c.id !== selection.id) }
@@ -182,7 +224,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
           : { ...d, subtitles: d.subtitles.filter((s) => s.id !== selection.id) },
     );
     setSelection(null);
-  }, [selection, hist.set]);
+  }, [selection, hist.set, pieces, deletePiece]);
 
   const addCut = () => {
     const t = snap(time);
@@ -246,6 +288,9 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
       if (e.key === " ") {
         e.preventDefault();
         togglePlay();
+      } else if (e.key.toLowerCase() === "s" && !mod) {
+        e.preventDefault();
+        splitRef.current();
       } else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         deleteSelected();
@@ -367,6 +412,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
           <div className="controls">
             <button className="play" onClick={togglePlay}>{playing ? "❚❚" : "▶"}</button>
             <span className="clock">{fmt(time, 2)} / {fmt(project.duration, 1)}</span>
+            <button onClick={splitAtPlayhead} title="재생 위치를 1프레임 단위로 나눕니다 (S)">✂ 여기서 나누기</button>
             <label className="check">
               <input type="checkbox" checked={skipCuts} onChange={(e) => setSkipCuts(e.target.checked)} />
               컷 적용해서 보기 (잘릴 구간 건너뛰기)
@@ -397,6 +443,10 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
           onAddCut={addCut}
           onAddSub={addSub}
           onAddSpeed={addSpeed}
+          pieces={pieces}
+          onSplit={splitAtPlayhead}
+          onDeletePiece={deletePiece}
+          onRejoin={rejoin}
           requestNotes={project.request?.unsupported ?? []}
           onRedetect={redetect}
         />
@@ -438,6 +488,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
         duration={project.duration}
         clips={project.clips}
         doc={doc}
+        pieces={pieces}
         wave={wave}
         time={time}
         playing={playing}

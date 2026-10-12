@@ -1,19 +1,22 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Clip, Cut, Group, SpeedRange, Subtitle } from "./api";
+import { adjacentCut, edgeKind, reviveRange, splitBounds, type EdgeKind, type Piece } from "./pieces";
 import { clamp, fmt, snap, uid } from "./time";
 
-export type Selection = { kind: "cut" | "sub" | "speed"; id: string } | null;
+export type Selection = { kind: "cut" | "sub" | "speed" | "piece"; id: string } | null;
 
 export interface Doc {
   cuts: Cut[];
   subtitles: Subtitle[];
   speeds: SpeedRange[];
+  splits: number[];
 }
 
 interface Props {
   duration: number;
   clips: Clip[];
   doc: Doc;
+  pieces: Piece[];
   wave: { frame_sec: number; db: number[] } | null;
   time: number;
   playing: boolean;
@@ -51,10 +54,11 @@ function blocksOf(clips: Clip[], groups: Group[]): string[][] {
   }
   return out;
 }
+const PIECE = 26;
 const SPEED = 24;
 const WAVE = 84;
 const SUBS = 48;
-const HEIGHT = RULER + CLIPS + SPEED + WAVE + SUBS;
+const HEIGHT = RULER + CLIPS + PIECE + SPEED + WAVE + SUBS;
 const NEW_SPEED = 1.5;
 const MIN_LEN = 1 / 30;
 const WAVE_FLOOR_DB = -60;
@@ -64,7 +68,8 @@ type Drag =
   | { type: "sub-l" | "sub-r" | "sub-move"; id: string; t0: number; orig: Subtitle }
   | { type: "new-cut"; t0: number; x0: number; id: string | null }
   | { type: "speed-l" | "speed-r" | "speed-move"; id: string; t0: number; orig: SpeedRange }
-  | { type: "new-speed"; t0: number; x0: number; id: string | null; lo: number; hi: number };
+  | { type: "new-speed"; t0: number; x0: number; id: string | null; lo: number; hi: number }
+  | { type: "piece"; side: "l" | "r"; piece: Piece; kind: EdgeKind; cutId: string; origCuts: Cut[]; origSplits: number[] };
 
 export default function Timeline(p: Props) {
   const scroller = useRef<HTMLDivElement>(null);
@@ -221,6 +226,37 @@ export default function Timeline(p: Props) {
       }), false);
       return;
     }
+    if (d.type === "piece") {
+      const left = d.side === "l";
+      const { piece, kind } = d;
+      const edge = left ? piece.start : piece.end;
+      if (kind === "split") {
+        // 나눈 지점은 위치만 옮겨진다(양옆 조각이 1프레임 이상 남게)
+        const [lo, hi] = splitBounds(piece, left ? "l" : "r", p.pieces);
+        const nt = clamp(t, lo, hi);
+        p.update((doc) => ({ ...doc, splits: d.origSplits.map((s) => (Math.abs(s - edge) < 1e-4 ? nt : s)) }), false);
+        return;
+      }
+      const inward = left ? t > edge + 1e-6 : t < edge - 1e-6;
+      const outward = left ? t < edge - 1e-6 : t > edge + 1e-6;
+      if (inward) {
+        // 조각을 줄인다 = 그만큼 새로 자른다
+        const a = left ? edge : clamp(t, piece.start + MIN_LEN, edge);
+        const b = left ? clamp(t, edge, piece.end - MIN_LEN) : edge;
+        p.update((doc) => ({ ...doc, cuts: [...d.origCuts, newCut(d.cutId, a, b)] }), false);
+      } else if (outward && kind === "cut") {
+        // 조각을 늘린다 = 잘린 원본을 그만큼 되살린다(잘린 구간 끝까지)
+        const range = adjacentCut(left ? "l" : "r", piece, d.origCuts);
+        if (range) {
+          const a = left ? clamp(t, range[0], edge) : edge;
+          const b = left ? edge : clamp(t, edge, range[1]);
+          p.update((doc) => ({ ...doc, cuts: reviveRange(d.origCuts, a, b, () => uid("cut")) }), false);
+        }
+      } else {
+        p.update((doc) => ({ ...doc, cuts: d.origCuts }), false);
+      }
+      return;
+    }
     const dt = t - d.t0;
     if (d.type === "speed-l" || d.type === "speed-r" || d.type === "speed-move") {
       const o = d.orig;
@@ -292,6 +328,10 @@ export default function Timeline(p: Props) {
       <div className="tl-labels">
         <div style={{ height: RULER }} />
         <div style={{ height: CLIPS }}>클립</div>
+        <div style={{ height: PIECE }}>
+          조각
+          <small>S = 나누기</small>
+        </div>
         <div style={{ height: SPEED }}>
           속도
           <small>드래그 = 추가</small>
@@ -404,10 +444,45 @@ export default function Timeline(p: Props) {
             })()}
           </div>
 
+          {/* 조각: 컷으로 잘리지 않고 남는 구간. 가장자리를 끌어 원본을 되살리거나 더 자른다 */}
+          <div
+            className="tl-pieces"
+            style={{ top: RULER + CLIPS, height: PIECE }}
+            onPointerDown={(e) => p.onSeek(tAt(e.clientX))}
+          >
+            {p.pieces.filter((pc) => visible(pc.start, pc.end)).map((pc) => {
+              const sel = p.selection?.kind === "piece" && p.selection.id === pc.id;
+              const kl = edgeKind("l", pc, p.doc.cuts, p.doc.splits);
+              const kr = edgeKind("r", pc, p.doc.cuts, p.doc.splits);
+              const grab = (e: React.PointerEvent, side: "l" | "r", kind: EdgeKind) =>
+                startDrag(e, {
+                  type: "piece", side, piece: pc, kind, cutId: uid("cut"),
+                  origCuts: p.doc.cuts, origSplits: p.doc.splits,
+                });
+              return (
+                <div
+                  key={pc.id}
+                  className={`piece ${sel ? "sel" : ""}`}
+                  style={{ left: pc.start * p.pps + 1, width: Math.max(2, (pc.end - pc.start) * p.pps - 2) }}
+                  title={`조각 ${fmt(pc.start, 2)} ~ ${fmt(pc.end, 2)} (${Math.round((pc.end - pc.start) * 30)}프레임)\n가장자리를 끌면 늘리거나 줄입니다`}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    p.onSelect({ kind: "piece", id: pc.id });
+                    p.onSeek(tAt(e.clientX));
+                  }}
+                >
+                  <span>{((pc.end - pc.start)).toFixed(1)}초</span>
+                  <div className={`h l ${kl}`} onPointerDown={(e) => grab(e, "l", kl)} />
+                  <div className={`h r ${kr}`} onPointerDown={(e) => grab(e, "r", kr)} />
+                </div>
+              );
+            })}
+          </div>
+
           {/* 배속 구간 */}
           <div
             className="tl-speed"
-            style={{ top: RULER + CLIPS, height: SPEED }}
+            style={{ top: RULER + CLIPS + PIECE, height: SPEED }}
             onPointerDown={(e) => {
               const t0 = snap(tAt(e.clientX));
               const lo = Math.max(0, ...p.doc.speeds.filter((r) => r.end <= t0 + 1e-6).map((r) => r.end));
@@ -439,7 +514,7 @@ export default function Timeline(p: Props) {
           {/* 파형 + 컷 */}
           <div
             className="tl-wave"
-            style={{ top: RULER + CLIPS + SPEED, height: WAVE }}
+            style={{ top: RULER + CLIPS + PIECE + SPEED, height: WAVE }}
             onPointerDown={(e) => startDrag(e, { type: "new-cut", t0: snap(tAt(e.clientX)), x0: e.clientX, id: null })}
           >
             <canvas ref={canvas} style={{ left: view.left, width: view.width, height: WAVE }} />
@@ -475,7 +550,7 @@ export default function Timeline(p: Props) {
           {/* 자막 */}
           <div
             className="tl-subs"
-            style={{ top: RULER + CLIPS + SPEED + WAVE, height: SUBS }}
+            style={{ top: RULER + CLIPS + PIECE + SPEED + WAVE, height: SUBS }}
             onPointerDown={(e) => p.onSeek(tAt(e.clientX))}
             onDoubleClick={(e) => {
               const t = snap(tAt(e.clientX));

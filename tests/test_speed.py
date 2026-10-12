@@ -70,6 +70,16 @@ class SpeedProjectTest(unittest.TestCase):
         # c1(0~10)이 5~15로, c2(10~15)가 0~5로. 경계를 넘는 9~12는 c1 9~10 → 14~15, c2 10~12 → 0~2로 나뉨
         self.assertEqual(spans, [(0.0, 2.0, 1.5), (7.0, 9.0, 2.0), (14.0, 15.0, 1.5)])
 
+    def test_reorder_moves_splits_with_clips_and_drops_clip_edges(self):
+        p = fake()
+        p["splits"] = [4.0, 10.0, 12.5]  # 10.0은 클립 경계라 버려진다
+        out = project.reorder(p, ["c2", "c1"], [])
+        self.assertEqual(out["splits"], [2.5, 9.0])  # c2(12.5 → 2.5), c1(4.0 → 9.0)
+
+    def test_clean_splits_validation(self):
+        self.assertEqual(jobs.clean_splits([3.0, 3.01, 0, 15, 99, "x", None, 7.5], 15.0), [3.0, 7.5])
+        self.assertEqual(jobs.clean_splits("bad", 15.0), [])
+
     def test_clean_speeds_validation(self):
         out = jobs.clean_speeds([{"id": "a", "start": 5, "end": 9, "speed": 2},
                                  {"start": 8, "end": 12, "speed": 0.1},

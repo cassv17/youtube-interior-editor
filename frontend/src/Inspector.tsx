@@ -1,12 +1,14 @@
 import { useState } from "react";
 import type { ClipAnalysis, Clip, Cut, SilenceParams, SpeedRange, Style, Subtitle } from "./api";
 import type { Selection } from "./Timeline";
+import { adjacentCut, edgeKind, type Piece } from "./pieces";
 import { fmt, snap } from "./time";
 
 export interface EditDoc {
   cuts: Cut[];
   subtitles: Subtitle[];
   speeds: SpeedRange[];
+  splits: number[];
   style: Style;
 }
 
@@ -27,6 +29,10 @@ interface Props {
   onAddCut: () => void;
   onAddSub: () => void;
   onAddSpeed: () => void;
+  pieces: Piece[];
+  onSplit: () => void;
+  onDeletePiece: (pc: Piece) => void;
+  onRejoin: (pc: Piece, side: "l" | "r") => void;
   requestNotes: string[]; // 처음 요청 중 자동으로 적용하지 못한 항목
   onRedetect: (p: SilenceParams) => Promise<void>;
 }
@@ -63,6 +69,10 @@ function EditTab(p: Props) {
     const c = p.doc.cuts.find((x) => x.id === sel.id);
     if (c) return <CutEditor {...p} cut={c} />;
   }
+  if (sel?.kind === "piece") {
+    const pc = p.pieces.find((x) => x.id === sel.id);
+    if (pc) return <PieceEditor {...p} piece={pc} />;
+  }
   if (sel?.kind === "speed") {
     const r = p.doc.speeds.find((x) => x.id === sel.id);
     if (r) return <SpeedEditor {...p} range={r} />;
@@ -89,6 +99,7 @@ function Overview(p: Props) {
         <dt>배속 구간</dt><dd>{p.doc.speeds.length}개</dd>
       </dl>
       <div className="row">
+        <button onClick={p.onSplit} title="재생 위치를 1프레임 단위로 나눕니다 (S)">✂ 여기서 나누기</button>
         <button onClick={p.onAddCut}>＋ 현재 위치에 컷</button>
         <button onClick={p.onAddSub}>＋ 현재 위치에 자막</button>
         <button onClick={p.onAddSpeed}>＋ 현재 위치에 배속</button>
@@ -248,6 +259,44 @@ function CutEditor(p: Props & { cut: Cut }) {
       </div>
       <Reasons reasons={c.review_reasons} onResolve={() => patch((x) => ({ ...x, needs_review: false, review_reasons: [] }))} />
       <p className="hint">타임라인에서 컷 양쪽 끝을 드래그해 범위를 조정할 수 있습니다. 컷을 더블클릭하면 적용/해제가 바뀝니다.</p>
+      <button className="link" onClick={() => p.onSelect(null)}>← 목록으로</button>
+    </div>
+  );
+}
+
+function PieceEditor(p: Props & { piece: Piece }) {
+  const pc = p.piece;
+  const label = (side: "l" | "r") => {
+    const kind = edgeKind(side, pc, p.doc.cuts, p.doc.splits);
+    const word = side === "l" ? "앞" : "뒤";
+    if (kind === "split") return { kind, text: `${word} 조각과 붙이기` };
+    if (kind === "cut") {
+      const r = adjacentCut(side, pc, p.doc.cuts);
+      return { kind, text: `${word}에 잘린 구간 되살리기${r ? ` (${(r[1] - r[0]).toFixed(1)}초)` : ""}` };
+    }
+    return { kind, text: `${word}쪽은 붙일 대상이 없음` };
+  };
+  const l = label("l"), r = label("r");
+  return (
+    <div className="editor">
+      <h3>조각 <small>{fmt(pc.start, 2)} ~ {fmt(pc.end, 2)}</small></h3>
+      <dl className="stats">
+        <dt>길이</dt><dd>{(pc.end - pc.start).toFixed(2)}초 ({Math.round((pc.end - pc.start) * 30)}프레임)</dd>
+      </dl>
+      <div className="row">
+        <button className="danger" onClick={() => p.onDeletePiece(pc)}>✂ 이 조각 지우기</button>
+        <button onClick={() => p.onPlayFrom(pc.start)}>▶ 이 조각 재생</button>
+      </div>
+      <h4>이어 붙이기</h4>
+      <div className="row">
+        <button disabled={l.kind === "fixed"} onClick={() => p.onRejoin(pc, "l")}>{l.text}</button>
+        <button disabled={r.kind === "fixed"} onClick={() => p.onRejoin(pc, "r")}>{r.text}</button>
+      </div>
+      <p className="hint">
+        타임라인 '조각' 줄에서 가장자리를 끌 수 있습니다. 잘린 구간 쪽 가장자리는 바깥으로 끌면 잘라냈던 원본이 되살아나고, 안쪽으로 끌면 그만큼 더 잘립니다.
+        나눈 지점은 위치만 옮겨집니다. 영상 처음·끝은 안쪽으로만 끌 수 있고, 원본이 끝난 곳 너머로는 늘릴 수 없습니다.
+        지운 조각은 컷으로 남아 있으니 컷을 지우거나 Ctrl+Z로 되돌릴 수 있습니다.
+      </p>
       <button className="link" onClick={() => p.onSelect(null)}>← 목록으로</button>
     </div>
   );

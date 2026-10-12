@@ -490,6 +490,19 @@ def clean_speeds(items, dur: float) -> list[dict]:
     return out
 
 
+def clean_splits(items, dur: float) -> list[float]:
+    """나눈 지점: 0~끝 사이로 제한하고 1/30초 격자에 맞추며, 같은 프레임의 중복은 하나만 둔다."""
+    out: set[float] = set()
+    for v in items if isinstance(items, list) else []:
+        try:
+            t = round(round(float(v) * 30) / 30, 3)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 < t < dur:
+            out.add(t)
+    return sorted(out)
+
+
 def apply_edits(pid: str, body: dict) -> dict:
     """화면에서 보낸 컷·자막·스타일을 검증해 저장한다."""
     with lock(pid):
@@ -522,6 +535,8 @@ def apply_edits(pid: str, body: dict) -> dict:
             data["subtitles"] = sorted(subs, key=lambda s: s["start"])
         if "speeds" in body:
             data["speed_ranges"] = clean_speeds(body["speeds"], dur)
+        if "splits" in body:
+            data["splits"] = clean_splits(body["splits"], dur)
         if "style" in body:
             data["style"] = {k: body["style"].get(k, v) for k, v in proj_mod.DEFAULT_STYLE.items()}
         save(pid, data)

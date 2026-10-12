@@ -236,3 +236,15 @@ ul.files a:hover { text-decoration: underline; }
 .req-result { margin-top: 10px; line-height: 1.6; }
 .req-result ul { margin: 4px 0 8px; padding-left: 20px; }
 .req-result .none { color: var(--warn); }
+
+/* 조각(나누기·지우기·연장) */
+.tl-pieces { position: absolute; left: 0; right: 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.piece {
+  position: absolute; top: 3px; bottom: 3px; background: rgba(111, 220, 155, 0.22); border: 1px solid #5fbf8a; border-radius: 3px;
+  font-size: 11px; padding: 0 6px; overflow: hidden; white-space: nowrap; display: flex; align-items: center; color: var(--muted);
+}
+.piece.sel { background: rgba(111, 220, 155, 0.42); outline: 2px solid #fff; outline-offset: -2px; z-index: 2; }
+.piece span { pointer-events: none; }
+.piece .h.cut:hover { background: rgba(255, 176, 32, 0.8); }
+.piece .h.split:hover { background: rgba(255, 255, 255, 0.7); }
+.piece .h.fixed:hover { background: rgba(255, 77, 77, 0.6); }

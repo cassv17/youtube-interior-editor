@@ -182,6 +182,7 @@ export interface Project {
   exports?: ExportResult[];
   groups?: Group[];
   speed_ranges?: SpeedRange[];
+  splits?: number[];
   request?: RequestNote;
   reference?: ReferenceNote;
   proxy?: string;
@@ -237,7 +238,7 @@ export const api = {
     form.append("file", file, file.name);
     return request<ReferenceResult>("/api/reference", { method: "POST", body: form });
   },
-  saveEdits: (id: string, edits: { cuts: Cut[]; subtitles: Subtitle[]; speeds: SpeedRange[]; style: Style }) =>
+  saveEdits: (id: string, edits: { cuts: Cut[]; subtitles: Subtitle[]; speeds: SpeedRange[]; splits: number[]; style: Style }) =>
     request<{ ok: boolean; updated: string }>(`/api/projects/${id}/edits`, json("PUT", edits)),
   redetect: (id: string, params: SilenceParams) =>
     request<Project>(`/api/projects/${id}/redetect`, json("POST", params)),
