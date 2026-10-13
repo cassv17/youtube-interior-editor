@@ -10,6 +10,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import shutil
 import tempfile
 import threading
@@ -18,7 +19,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from .core import export as export_mod, media, project as proj_mod, reference, render, request_ai, silence, stt
+from .core import assets as assets_mod, export as export_mod, layers as layers_mod, media, project as proj_mod, reference, render, request_ai, silence, stt
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECTS_DIR = ROOT / "workspace" / "projects"
@@ -110,6 +111,63 @@ def delete_project(pid: str) -> int:
         _export_status.pop(pid, None)
     _locks.pop(pid, None)
     return size
+
+
+# ---------- 추가 자료(다른 레이어에 올릴 영상·이미지·음악) ----------
+
+def add_asset(pid: str, filename: str, fobj) -> dict:
+    """자료를 프로젝트 폴더에 사본으로 저장하고, 정보를 읽고, 미리보기 사본을 만든다."""
+    kind = assets_mod.kind_of(filename)
+    if kind is None:
+        raise ValueError(f"지원하지 않는 파일 형식입니다: {filename} (영상·이미지·음악 파일만 가능)")
+    d = project_dir(pid)
+    if load(pid).get("status") == "completed":
+        raise ValueError("완료된 작업에는 자료를 추가할 수 없습니다.")
+    aid = "a" + secrets.token_hex(3)
+    folder = d / "assets"
+    folder.mkdir(exist_ok=True)
+    dest = folder / f"{aid}_{assets_mod.safe_name(filename)}"
+    try:
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(fobj, out, 1024 * 1024)
+        info = assets_mod.probe_asset(dest, kind)
+        preview = assets_mod.make_preview(dest, kind, folder / "preview", aid)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
+    asset = {"id": aid, "name": Path(filename).name, "kind": kind, "path": str(dest.resolve()), "preview": preview,
+             "size": dest.stat().st_size, **info}
+    with lock(pid):
+        data = load(pid)
+        data.setdefault("assets", []).append(asset)
+        save(pid, data)
+    return asset
+
+
+def remove_asset(pid: str, aid: str) -> None:
+    """쓰이지 않는 자료를 지운다."""
+    with lock(pid):
+        data = load(pid)
+        asset = next((a for a in data.get("assets", []) if a["id"] == aid), None)
+        if asset is None:
+            raise KeyError(aid)
+        if any(o.get("src") == aid and o.get("type") != "clip" for o in data.get("overlays", [])):
+            raise RuntimeError("타임라인에서 쓰고 있는 자료는 지울 수 없습니다. 먼저 레이어에서 빼 주세요.")
+        data["assets"] = [a for a in data["assets"] if a["id"] != aid]
+        save(pid, data)
+    for f in (Path(asset["path"]), project_dir(pid) / "assets" / "preview" / asset["preview"]):
+        f.unlink(missing_ok=True)
+
+
+def asset_preview_path(pid: str, aid: str) -> Path:
+    data = load(pid)
+    asset = next((a for a in data.get("assets", []) if a["id"] == aid), None)
+    if asset is None:
+        raise KeyError(aid)
+    f = project_dir(pid) / "assets" / "preview" / asset["preview"]
+    if not f.is_file():
+        raise KeyError(aid)
+    return f
 
 
 def _safe_name(name: str) -> str:
@@ -570,6 +628,9 @@ def apply_edits(pid: str, body: dict) -> dict:
         if data["status"] != "ready":
             raise RuntimeError("분석이 끝난 뒤에 편집할 수 있습니다.")
         dur = data["duration"]
+        if "tracks" in body:
+            data["tracks"] = layers_mod.clean_tracks(body["tracks"])
+        sub_tracks = {t["id"] for t in layers_mod.tracks_of(data) if t["kind"] == "subtitle"}
         if "cuts" in body:
             cuts = []
             for c in body["cuts"]:
@@ -595,6 +656,8 @@ def apply_edits(pid: str, body: dict) -> dict:
                 sub.pop("free", None)
                 sub.pop("e_start", None)
                 sub.pop("e_end", None)
+                if sub.get("track") not in sub_tracks:
+                    sub.pop("track", None)  # 없는 레이어면 기본(맨 아래 자막 레이어)으로
                 if s.get("free"):  # 조각에서 분리된 자막: 결과 시간에 고정
                     es, ee = _num(s.get("e_start", 0), 0, 1e5), _num(s.get("e_end", 0), 0, 1e5)
                     if ee - es < 0.05:
@@ -608,6 +671,10 @@ def apply_edits(pid: str, body: dict) -> dict:
             data["splits"] = clean_splits(body["splits"], dur)
         if "layout" in body:
             data["layout"] = clean_layout(body["layout"], dur)
+        if "overlays" in body or "tracks" in body:
+            data["overlays"] = layers_mod.clean_overlays(body.get("overlays", data.get("overlays", [])), data)
+        if "markers" in body:
+            data["markers"] = layers_mod.clean_markers(body["markers"])
         if "style" in body:
             data["style"] = {k: body["style"].get(k, v) for k, v in proj_mod.DEFAULT_STYLE.items()}
         save(pid, data)

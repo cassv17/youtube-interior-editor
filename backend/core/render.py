@@ -92,7 +92,7 @@ def _audio_chain(inp: str, clip: dict) -> str:
 
 
 def build_inputs_and_graph(project: dict, segments: dict[str, list[tuple[float, float]]] | None,
-                           w: int, h: int, video_filter: str = "") -> tuple[list[str], str, float]:
+                           w: int, h: int, video_filter: str = "", plan=None) -> tuple[list[str], str, float]:
     """ffmpeg 입력 인자, filter_complex 문자열, 결과 길이(초)를 만든다.
 
     segments: {clip_id: [(시작, 끝) 또는 (시작, 끝, 배속), ...]} 클립 기준 시간의 '남길' 구간. None이면 클립 전체.
@@ -159,10 +159,15 @@ def build_inputs_and_graph(project: dict, segments: dict[str, list[tuple[float, 
         outs.append(k)
         total += frames / fps if retimed else sum(e - s for s, e in segs)
 
+    layered = plan is not None and not plan.empty
     if not outs:
-        raise MediaError("남길 구간이 없습니다. 컷이 영상 전체를 덮고 있습니다.")
-    parts.append("".join(f"[v{k}][a{k}]" for k in outs) + f"concat=n={len(outs)}:v=1:a=1[vc][ac]")
-    parts.append(f"[vc]{video_filter or 'null'}[vout]")
+        if not (layered and plan.end_f > 0):
+            raise MediaError("남길 구간이 없습니다. 컷이 영상 전체를 덮고 있습니다.")
+        empty_main(parts, plan, w, h, fps)
+    else:
+        parts.append("".join(f"[v{k}][a{k}]" for k in outs)
+                     + f"concat=n={len(outs)}:v=1:a=1[vc][{'ac0' if layered else 'ac'}]")
+    total = finish_graph(args, parts, n_in, round(total * fps), plan, w, h, fps, video_filter)
     return args, ";\n".join(parts), total
 
 
@@ -215,7 +220,7 @@ def make_proxy(project: dict, out_path: Path, progress=None, height: int = 540) 
 
 
 def build_layout_graph(project: dict, sequence: list[tuple], w: int, h: int,
-                       video_filter: str = "") -> tuple[list[str], str, float]:
+                       video_filter: str = "", plan=None) -> tuple[list[str], str, float]:
     """결과 배치(순서 바꿈·빈칸)를 만든다. sequence 항목:
       ("gap", 프레임수)
       ("atom", 클립, 클립 기준 시작(초), 끝(초), 배속, 결과 프레임수)
@@ -259,8 +264,97 @@ def build_layout_graph(project: dict, sequence: list[tuple], w: int, h: int,
                              f"asetpts=PTS-STARTPTS,{tail}")
         total_frames += n
         labels.append(f"[v{i}][a{i}]")
+    layered = plan is not None and not plan.empty
     if not labels:
-        raise MediaError("남길 구간이 없습니다. 컷이 영상 전체를 덮고 있습니다.")
-    parts.append("".join(labels) + f"concat=n={len(labels)}:v=1:a=1[vc][ac]")
-    parts.append(f"[vc]{video_filter or 'null'}[vout]")
-    return args, ";\n".join(parts), total_frames / fps
+        if not (layered and plan.end_f > 0):
+            raise MediaError("남길 구간이 없습니다. 컷이 영상 전체를 덮고 있습니다.")
+        empty_main(parts, plan, w, h, fps)
+    else:
+        parts.append("".join(labels) + f"concat=n={len(labels)}:v=1:a=1[vc][{'ac0' if layered else 'ac'}]")
+    total = finish_graph(args, parts, n_in, total_frames, plan, w, h, fps, video_filter)
+    return args, ";\n".join(parts), total
+
+
+def _item_input(li, fps: int) -> list[str]:
+    extra = f"{li.frames / fps + 0.2:.6f}"
+    if li.type == "image":
+        return ["-loop", "1", "-framerate", str(fps), "-t", extra, "-i", li.path]
+    return ["-ss", f"{li.src_in:.6f}", "-t", extra, "-i", li.path]
+
+
+def finish_graph(args: list[str], parts: list[str], n_in: int, main_frames: int, plan, w: int, h: int,
+                 fps: int, video_filter: str) -> float:
+    """메인(순서·빈칸이 반영된 [vc][ac0])에 레이어를 얹고 자막 필터를 건다. 결과 길이(초)를 돌려준다.
+
+    plan이 없거나 비어 있으면(레이어 없음·메인 볼륨 그대로) 기존 그래프를 그대로 마무리한다.
+    영상 항목은 아래 트랙부터 차례로 덮어쓰고(위 트랙이 앞), 소리는 메인과 모두 섞는다.
+    """
+    if plan is None or plan.empty:
+        parts.append(f"[vc]{video_filter or 'null'}[vout]")
+        return main_frames / fps
+    total = max(main_frames, plan.end_f)
+    v = "[vc]"
+    if total > main_frames:
+        parts.append(f"{v}tpad=stop_mode=add:stop_duration={(total - main_frames) / fps:.6f}:color=black[vpad]")
+        v = "[vpad]"
+
+    index: dict[str, int] = {}
+    for li in plan.visuals + plan.audios:
+        if li.id not in index:
+            args += _item_input(li, fps)
+            index[li.id] = n_in
+            n_in += 1
+
+    for k, li in enumerate(plan.visuals):
+        n = index[li.id]
+        dur = li.frames / fps
+        chain = (f"[{n}:v:0]setpts=PTS-STARTPTS,fps={fps},"
+                 f"scale={w}:{h}:force_original_aspect_ratio=decrease")
+        if abs(li.scale - 1.0) > 1e-6:
+            chain += f",scale=trunc(iw*{li.scale:.4f}/2)*2:trunc(ih*{li.scale:.4f}/2)*2"
+        chain += ",format=rgba"
+        if li.opacity < 0.999:
+            chain += f",colorchannelmixer=aa={li.opacity:.3f}"
+        if li.fade_in > 0:
+            chain += f",fade=t=in:st=0:d={li.fade_in:.3f}:alpha=1"
+        if li.fade_out > 0:
+            chain += f",fade=t=out:st={max(0.0, dur - li.fade_out):.3f}:d={li.fade_out:.3f}:alpha=1"
+        chain += f",trim=end_frame={li.frames},setpts=PTS-STARTPTS+{li.start_f / fps:.6f}/TB[ov{k}]"
+        parts.append(chain)
+        s, e = li.start_f / fps, (li.start_f + li.frames) / fps
+        parts.append(f"{v}[ov{k}]overlay=x=W*{li.x:.4f}-w/2:y=H*{li.y:.4f}-h/2:eof_action=pass:"
+                     f"enable='between(t,{s:.6f},{e:.6f})'[vo{k}]")
+        v = f"[vo{k}]"
+    parts.append(f"{v}{video_filter or 'null'}[vout]")
+
+    mix = []
+    for k, li in enumerate(plan.audios):
+        n = index[li.id]
+        dur = li.frames / fps
+        chain = (f"[{n}:a:0]aresample={AUDIO_RATE},aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                 f"asetpts=PTS-STARTPTS,atrim=duration={dur:.6f},asetpts=PTS-STARTPTS")
+        if abs(li.volume - 1.0) > 1e-6:
+            chain += f",volume={li.volume:.3f}"
+        if li.fade_in > 0:
+            chain += f",afade=t=in:st=0:d={li.fade_in:.3f}"
+        if li.fade_out > 0:
+            chain += f",afade=t=out:st={max(0.0, dur - li.fade_out):.3f}:d={li.fade_out:.3f}"
+        chain += f",adelay={round(li.start_f / fps * 1000)}:all=1[au{k}]"
+        parts.append(chain)
+        mix.append(f"[au{k}]")
+    base = f"[ac0]volume={plan.main_volume:.3f},apad=whole_dur={total / fps:.6f}"
+    if mix:
+        parts.append(base + "[am0]")
+        parts.append("[am0]" + "".join(mix) + f"amix=inputs={len(mix) + 1}:duration=first:normalize=0[ac]")
+    else:
+        parts.append(base + "[ac]")
+    return total / fps
+
+
+def empty_main(parts: list[str], plan, w: int, h: int, fps: int) -> None:
+    """메인에 남길 구간이 없어도 레이어가 있으면 검은 바탕 위에 올린다."""
+    d = plan.end_f / fps
+    parts.append(f"color=c=black:s={w}x{h}:r={fps}:d={d + 1:.6f},format=yuv420p,setsar=1,"
+                 f"trim=end_frame={plan.end_f},setpts=N/{fps}/TB[vc]")
+    parts.append(f"anullsrc=r={AUDIO_RATE}:cl=stereo,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                 f"atrim=duration={d:.6f},asetpts=PTS-STARTPTS[ac0]")

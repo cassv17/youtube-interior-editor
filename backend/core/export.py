@@ -11,7 +11,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from . import layout as layout_mod, nle, render
+from . import layers as layers_mod, layout as layout_mod, nle, render
 from .media import MediaError
 
 MIN_SPEED, MAX_SPEED = 0.5, 4.0
@@ -141,33 +141,50 @@ def map_time(t: float, cuts: list[tuple[float, float]],
     return out
 
 
-def _finish_subtitles(raw: list[tuple[float, float, str]]) -> list[dict]:
-    """결과 시간으로 옮긴 자막을 시간순으로 정리한다: 너무 짧거나 빈 것은 빼고, 겹치지 않게 한다."""
+def _finish_subtitles(raw: list[tuple]) -> list[dict]:
+    """결과 시간으로 옮긴 자막을 정리한다: 너무 짧거나 빈 것은 빼고, 같은 레이어 안에서는 겹치지 않게 한다.
+    raw 항목: (시작, 끝, 글, 트랙 id). 레이어가 다르면 같은 시간에 겹쳐 보여도 된다."""
+    by_track: dict[str, list[tuple]] = {}
+    for s, e, text, tid in raw:
+        by_track.setdefault(tid, []).append((s, e, text))
     out: list[dict] = []
-    for s, e, text in sorted(raw):
-        if e - s < MIN_SUB or not text.strip():
-            continue
-        if out and s < out[-1]["end"]:  # 컷 때문에 붙은 자막끼리 겹치지 않게
-            s = out[-1]["end"]
-            if e - s < MIN_SUB:
+    for tid, items in by_track.items():
+        prev: dict | None = None
+        for s, e, text in sorted(items):
+            if e - s < MIN_SUB or not text.strip():
                 continue
-        out.append({"start": round(s, 3), "end": round(e, 3), "text": text.strip()})
-    return out
+            if prev and s < prev["end"]:  # 컷 때문에 붙은 자막끼리 겹치지 않게
+                s = prev["end"]
+                if e - s < MIN_SUB:
+                    continue
+            prev = {"start": round(s, 3), "end": round(e, 3), "text": text.strip(), "track": tid}
+            out.append(prev)
+    return sorted(out, key=lambda x: (x["start"], x["end"]))
 
 
-def _free_subtitles(project: dict) -> list[tuple[float, float, str]]:
+def _visible_subtitle(project: dict, sub: dict) -> str | None:
+    """자막이 속한 트랙 id. 숨긴 트랙이면 None."""
+    tid = layers_mod.subtitle_track(project, sub)
+    return None if layers_mod.track_map(project).get(tid, {}).get("hidden") else tid
+
+
+def _free_subtitles(project: dict) -> list[tuple]:
     """조각에서 분리된 자막: 결과 시간(e_start~e_end)에 그대로 놓인다."""
     out = []
     for s in project["subtitles"]:
-        if s.get("free") and s.get("e_start") is not None and s.get("e_end") is not None:
-            out.append((float(s["e_start"]), float(s["e_end"]), s["text"]))
+        tid = _visible_subtitle(project, s)
+        if tid and s.get("free") and s.get("e_start") is not None and s.get("e_end") is not None:
+            out.append((float(s["e_start"]), float(s["e_end"]), s["text"], tid))
     return out
 
 
 def remap_subtitles(project: dict, cuts: list[tuple[float, float]],
                     speeds: list[tuple[float, float, float]] | None = None) -> list[dict]:
-    raw = [(map_time(s["start"], cuts, speeds), map_time(s["end"], cuts, speeds), s["text"])
-           for s in project["subtitles"] if not s.get("free")]
+    raw = []
+    for s in project["subtitles"]:
+        tid = _visible_subtitle(project, s)
+        if tid and not s.get("free"):
+            raw.append((map_time(s["start"], cuts, speeds), map_time(s["end"], cuts, speeds), s["text"], tid))
     return _finish_subtitles(raw + _free_subtitles(project))
 
 
@@ -178,7 +195,12 @@ def output_subtitles(project: dict) -> list[dict]:
     if items is None:
         return remap_subtitles(project, merged_cuts(project), speeds)
     placed, _ = layout_mod.place(items, speeds)
-    return _finish_subtitles(layout_mod.instances(placed, project["subtitles"]) + _free_subtitles(project))
+    raw = []
+    for s in project["subtitles"]:
+        tid = _visible_subtitle(project, s)
+        if tid and not s.get("free"):
+            raw += [(a, b, text, tid) for a, b, text in layout_mod.instances(placed, [s])]
+    return _finish_subtitles(raw + _free_subtitles(project))
 
 
 def layout_sequence(project: dict) -> list[tuple] | None:
@@ -228,31 +250,46 @@ def _ass_color(hex_rgb: str, alpha: int = 0) -> str:
     return f"&H{alpha:02X}{b}{g}{r}".upper()
 
 
-def to_ass(subs: list[dict], style: dict, width: int, height: int) -> str:
-    """영상에 입힐 자막(ASS). 크기·여백은 편집 화면 미리보기와 같은 '영상 높이 대비 %' 기준."""
+def _ass_style_line(name: str, style: dict, width: int, height: int) -> str:
     size = height * style["size"] / 100  # 미리보기와 같은 글자 크기(px)
     outline = size * style["outline"]
     shadow = size * 0.05 if style["shadow"] else 0
     font_size = size * FONT_CELL_RATIO
     align = 8 if style["position"] == "top" else 2  # 8: 상단 가운데, 2: 하단 가운데
     margin_v = height * style["margin"] / 100
-    head = (
-        "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\n"
-        f"PlayResX: {width}\nPlayResY: {height}\n\n"
-        "[V4+ Styles]\n"
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
-        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{style['font']},{font_size:.1f},{_ass_color(style['color'])},{_ass_color(style['color'])},"
-        f"{_ass_color(style['outline_color'])},{_ass_color('#000000', 0x60)},0,0,0,0,100,100,0,0,1,"
-        f"{outline:.2f},{shadow:.2f},{align},{int(width * 0.05)},{int(width * 0.05)},{int(margin_v)},1\n\n"
-        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-    )
-    lines = []
-    for s in subs:
-        text = s["text"].replace("\\", "＼").replace("{", "(").replace("}", ")").replace("\n", "\\N")
-        lines.append(f"Dialogue: 0,{_ass_time(s['start'])},{_ass_time(s['end'])},Default,,0,0,0,,{text}")
-    return head + "\n".join(lines) + "\n"
+    return (f"Style: {name},{style['font']},{font_size:.1f},{_ass_color(style['color'])},{_ass_color(style['color'])},"
+            f"{_ass_color(style['outline_color'])},{_ass_color('#000000', 0x60)},0,0,0,0,100,100,0,0,1,"
+            f"{outline:.2f},{shadow:.2f},{align},{int(width * 0.05)},{int(width * 0.05)},{int(margin_v)},1")
+
+
+_ASS_HEAD = ("[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\n"
+             "PlayResX: {w}\nPlayResY: {h}\n\n[V4+ Styles]\n"
+             "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+             "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+             "Alignment, MarginL, MarginR, MarginV, Encoding\n")
+_ASS_EVENTS = "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+
+
+def _ass_text(text: str) -> str:
+    return text.replace("\\", "＼").replace("{", "(").replace("}", ")").replace("\n", "\\N")
+
+
+def to_ass(subs: list[dict], style: dict, width: int, height: int) -> str:
+    """영상에 입힐 자막(ASS). 크기·여백은 편집 화면 미리보기와 같은 '영상 높이 대비 %' 기준."""
+    lines = [f"Dialogue: 0,{_ass_time(s['start'])},{_ass_time(s['end'])},Default,,0,0,0,,{_ass_text(s['text'])}"
+             for s in subs]
+    return (_ASS_HEAD.format(w=width, h=height) + _ass_style_line("Default", style, width, height) + "\n\n"
+            + _ASS_EVENTS + "\n".join(lines) + "\n")
+
+
+def to_ass_layers(subs: list[dict], styles: dict[str, dict], layers: dict[str, int], width: int, height: int) -> str:
+    """자막 레이어(트랙)마다 스타일을 따로 두고, 위 레이어가 앞에 그려지게 Layer 번호를 준다."""
+    used = sorted({s.get("track", "") for s in subs})
+    head = _ASS_HEAD.format(w=width, h=height) + "\n".join(
+        _ass_style_line(f"T_{tid}", styles[tid], width, height) for tid in used) + "\n\n"
+    lines = [f"Dialogue: {layers.get(s.get('track', ''), 1)},{_ass_time(s['start'])},{_ass_time(s['end'])},"
+             f"T_{s.get('track', '')},,0,0,0,,{_ass_text(s['text'])}" for s in subs]
+    return head + _ASS_EVENTS + "\n".join(lines) + "\n"
 
 
 # ---------- 실행 ----------
@@ -283,15 +320,19 @@ def encode(project: dict, mp4: Path, burn: bool, progress=None) -> float:
     segments = keep_pieces(project, cuts, speeds) if speeds else keep_segments(project, cuts)
     subs = output_subtitles(project)
     w, h = project["output"]["width"], project["output"]["height"]
+    plan = layers_mod.build_plan(project)
     files = {}
     vf = ""
     if burn and subs:
-        files["subs.ass"] = to_ass(subs, project["style"], w, h)
+        tracks = {s["track"] for s in subs}
+        styles = {tid: layers_mod.subtitle_style(project, tid, project["style"]) for tid in tracks}
+        order = {tid: layers_mod.subtitle_layer(project, tid) for tid in tracks}
+        files["subs.ass"] = to_ass_layers(subs, styles, order, w, h)
         vf = "ass=subs.ass"
     if sequence:
-        inputs, graph, total = render.build_layout_graph(project, sequence, render.even(w), render.even(h), vf)
+        inputs, graph, total = render.build_layout_graph(project, sequence, render.even(w), render.even(h), vf, plan)
     else:
-        inputs, graph, total = render.build_inputs_and_graph(project, segments, render.even(w), render.even(h), vf)
+        inputs, graph, total = render.build_inputs_and_graph(project, segments, render.even(w), render.even(h), vf, plan)
     common = ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
     used_qsv = render.qsv_available()
     try:
@@ -373,6 +414,28 @@ def prepare_media(project: dict, media_dir: Path, move: bool) -> dict[str, Path]
             else:
                 shutil.copy2(str(src), str(dst))
             result[clip["id"]] = dst
+            result["clip:" + clip["id"]] = dst
+        plan = layers_mod.build_plan(project)  # 다른 레이어에 올린 자료도 XML이 가리킬 수 있게 함께 둔다
+        assets = {a["id"]: a for a in project.get("assets", [])}
+        for aid in sorted({li.src for li in plan.visuals + plan.audios if li.type != "clip"}):
+            a = assets.get(aid)
+            if not a:
+                continue
+            src = Path(a["path"])
+            name = re.sub(r'[\/:*?"<>|]', "_", a["name"]) or "asset"
+            stem, suf = Path(name).stem, Path(name).suffix
+            k = 2
+            while name.lower() in used:
+                name = f"{stem} ({k}){suf}"
+                k += 1
+            used.add(name.lower())
+            dst = media_dir / name
+            if move:
+                shutil.move(str(src), str(dst))
+                moved.append((dst, src))
+            else:
+                shutil.copy2(str(src), str(dst))
+            result["asset:" + aid] = dst
     except Exception:
         for dst, src in reversed(moved):
             shutil.move(str(dst), str(src))
@@ -383,9 +446,10 @@ def prepare_media(project: dict, media_dir: Path, move: bool) -> dict[str, Path]
 def write_xml(project: dict, pkg: Path, media: dict[str, Path]) -> Path:
     cuts = merged_cuts(project)
     speeds = merged_speeds(project)
+    plan = layers_mod.build_plan(project)
     xml = pkg / f"{_safe(project.get('name', '영상'))}_프리미어_다빈치.xml"
     xml.write_text(nle.to_xml(project, keep_pieces(project, cuts, speeds), media, project.get("name", "영상"),
-                           sequence=layout_sequence(project)),
+                           sequence=layout_sequence(project), layers=plan.visuals + [a for a in plan.audios if a.type == "audio"]),
                    encoding="utf-8")
     return xml
 
@@ -398,6 +462,6 @@ def build_package(project: dict, out_dir: Path, formats: list[str], move_media: 
         media = prepare_media(project, pkg / "media", move=move_media)
         xml = write_xml(project, pkg, media)
         files.append(str(xml))
-        files += [str(p) for p in media.values()]
+        files += [str(p) for p in dict.fromkeys(media.values())]
     return {"folder": str(pkg), "files": files, "formats": formats,
             "created": datetime.now().isoformat(timespec="seconds")}

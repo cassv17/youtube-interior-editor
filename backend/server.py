@@ -97,6 +97,38 @@ def delete_project(pid: str):
         raise HTTPException(500, str(e))
 
 
+@app.post("/api/projects/{pid}/assets")
+def upload_asset(pid: str, file: UploadFile):
+    """다른 레이어에 올릴 영상·이미지·음악 파일을 추가한다."""
+    _get(pid)
+    try:
+        return jobs.add_asset(pid, file.filename or "file", file.file)
+    except (ValueError, MediaError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/projects/{pid}/assets/{aid}")
+def delete_asset(pid: str, aid: str):
+    _get(pid)
+    try:
+        jobs.remove_asset(pid, aid)
+    except KeyError:
+        raise HTTPException(404, "자료를 찾을 수 없습니다.")
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True}
+
+
+@app.get("/api/projects/{pid}/assets/{aid}/file")
+def asset_file(pid: str, aid: str):
+    _get(pid)
+    try:
+        f = jobs.asset_preview_path(pid, aid)
+    except KeyError:
+        raise HTTPException(404, "자료를 찾을 수 없습니다.")
+    return FileResponse(f)
+
+
 @app.post("/api/projects/{pid}/start")
 def start(pid: str, body: dict):
     _get(pid)

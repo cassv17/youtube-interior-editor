@@ -39,8 +39,78 @@ def _speed_filter(speed: float, mediatype: str) -> str:
     )
 
 
+def _filter(name: str, effectid: str, category: str, mediatype: str, params: str) -> str:
+    return (f"<filter><effect><name>{name}</name><effectid>{effectid}</effectid>"
+            f"<effectcategory>{category}</effectcategory><effecttype>{category}</effecttype>"
+            f"<mediatype>{mediatype}</mediatype>{params}</effect></filter>")
+
+
+def _param(pid: str, label: str, value: str, lo: str = "", hi: str = "") -> str:
+    rng = (f"<valuemin>{lo}</valuemin><valuemax>{hi}</valuemax>" if lo != "" else "")
+    return f'<parameter authoringApp="PremierePro"><parameterid>{pid}</parameterid><name>{label}</name>{rng}<value>{value}</value></parameter>'
+
+
+def _layer_tracks(layers: list, media: dict, w: int, h: int, written: set[str], tracks: list) -> tuple[str, str]:
+    """추가 레이어를 트랙별 XML로. layers: 합성 항목(LayerItem) 목록(아래 → 위), tracks: 트랙 정보(보이는 트랙만).
+    미디어 파일은 media['clip:<id>'] 또는 media['asset:<id>'] 의 복사본을 가리킨다."""
+    vids: dict[str, list] = {}
+    auds: dict[str, list] = {}
+    for li in layers:
+        if li.type in ("video", "image", "clip"):
+            vids.setdefault(li.track, []).append(li)
+        if li.has_audio and (li.type == "audio" or li.type in ("video", "clip")):
+            auds.setdefault(li.track, []).append(li)
+
+    def file_el(li) -> str:
+        key = ("clip:" if li.type == "clip" else "asset:") + li.src
+        fid = f"file-{key}"
+        if fid in written:
+            return f'<file id="{escape(fid)}"/>'
+        written.add(fid)
+        path = media[key]
+        dur = round(li.src_dur * 30) if li.type != "image" else 150
+        video = (f"<video><samplecharacteristics><width>{li.src_w or w}</width><height>{li.src_h or h}</height>"
+                 "</samplecharacteristics></video>") if li.type != "audio" else ""
+        audio = ("<audio><samplecharacteristics><depth>16</depth><samplerate>48000</samplerate></samplecharacteristics>"
+                 "<channelcount>2</channelcount></audio>") if li.has_audio else ""
+        return (f'<file id="{escape(fid)}"><name>{escape(path.name)}</name><pathurl>{escape(_pathurl(path))}</pathurl>'
+                f"{_rate(30)}<duration>{dur}</duration><media>{video}{audio}</media></file>")
+
+    def common(li, idx: int, kind: str) -> str:
+        start, end = li.start_f, li.start_f + li.frames
+        a = round(li.src_in * 30)
+        return (f'<clipitem id="{kind}-{escape(li.id)}-{idx}"><name>{escape(li.name or li.id)}</name><enabled>TRUE</enabled>'
+                f"<duration>{max(li.frames, round(li.src_dur * 30))}</duration>{_rate(30)}"
+                f"<start>{start}</start><end>{end}</end><in>{a}</in><out>{a + li.frames}</out>{file_el(li)}")
+
+    video_xml = ""
+    for tid, items in vids.items():
+        body = ""
+        for i, li in enumerate(items):
+            fit = min(w / max(li.src_w, 1), h / max(li.src_h, 1)) if li.src_w and li.src_h else 1.0
+            motion = _filter("Basic Motion", "basic", "motion", "video",
+                             _param("scale", "Scale", f"{li.scale * fit * 100:.2f}", "0", "1000")
+                             + _param("center", "Center", f"<horiz>{li.x - 0.5:.4f}</horiz><vert>{li.y - 0.5:.4f}</vert>"))
+            opac = _filter("Opacity", "opacity", "motion", "video",
+                           _param("opacity", "opacity", f"{li.opacity * 100:.1f}", "0", "100")) if li.opacity < 0.999 else ""
+            body += common(li, i, "v") + motion + opac + "</clipitem>"
+        video_xml += f"<track>{body}</track>"
+
+    audio_xml = ""
+    for tid, items in auds.items():
+        for ch in (1, 2):
+            body = ""
+            for i, li in enumerate(items):
+                lvl = _filter("Audio Levels", "audiolevels", "audiolevels", "audio",
+                              _param("level", "Level", f"{li.volume:.3f}", "0", "3.98109")) if abs(li.volume - 1) > 1e-6 else ""
+                body += (common(li, i, "a") + lvl
+                         + f"<sourcetrack><mediatype>audio</mediatype><trackindex>{ch}</trackindex></sourcetrack></clipitem>")
+            audio_xml += f"<track>{body}</track>"
+    return video_xml, audio_xml
+
+
 def to_xml(project: dict, segments: dict[str, list[tuple]], media: dict[str, Path],
-           name: str, sequence: list[tuple] | None = None) -> str:
+           name: str, sequence: list[tuple] | None = None, layers: list | None = None) -> str:
     """segments: {clip_id: [(클립 기준 시작, 끝) 또는 (시작, 끝, 배속)]}, media: {clip_id: 미디어 파일 경로}
 
     sequence가 있으면(결과 배치: 순서 바꿈·빈칸) segments 대신 그 순서와 위치를 그대로 쓴다.
@@ -108,6 +178,8 @@ def to_xml(project: dict, segments: dict[str, list[tuple]], media: dict[str, Pat
             f"{src}{links}</clipitem>"
         )
 
+    extra_v, extra_a = _layer_tracks(layers or [], media, w, h, files_written, []) if layers else ("", "")
+    total = max(total, max([li.start_f + li.frames for li in layers] or [0])) if layers else total
     video = "".join(clipitem("v", i, c, s, e, a, b, sp) for i, (c, s, e, a, b, sp) in enumerate(items))
     audio_tracks = "".join(
         "<track>" + "".join(clipitem("a", i, c, s, e, a, b, sp, ti) for i, (c, s, e, a, b, sp) in enumerate(items))
@@ -122,7 +194,7 @@ def to_xml(project: dict, segments: dict[str, list[tuple]], media: dict[str, Pat
         "<media><video><format><samplecharacteristics>"
         f"{_rate(SEQ_FPS)}<width>{w}</width><height>{h}</height><pixelaspectratio>square</pixelaspectratio>"
         "</samplecharacteristics></format>"
-        f"<track>{video}</track></video>"
-        f"<audio><numOutputChannels>2</numOutputChannels>{audio_tracks}</audio>"
+        f"<track>{video}</track>{extra_v}</video>"
+        f"<audio><numOutputChannels>2</numOutputChannels>{audio_tracks}{extra_a}</audio>"
         "</media></sequence></xmeml>\n"
     )
