@@ -97,6 +97,7 @@ def build_project(paths: list[str | Path], params: silence.SilenceParams,
         "subtitles": [],
         "speed_ranges": [],  # [{id, start, end, speed}] 타임라인 시간, 배속 구간
         "splits": [],        # 사용자가 '나누기'로 표시한 지점(초). 결과 영상에는 영향 없고, 조각 선택·삭제용
+        "layout": [],        # 결과 배치: [{id, a, b, gap}] 조각 순서와 앞 빈칸. 비어 있으면 원본 순서·빈칸 없음
         "style": dict(DEFAULT_STYLE),
     }
 
@@ -139,7 +140,7 @@ def _check_groups(order: list[str], groups: list[dict]) -> list[dict]:
 
 
 def reorder(project: dict, order: list[str], groups: list[dict]) -> dict:
-    """클립 순서를 바꾼다. 각 클립의 컷·자막·배속 구간·나눈 지점은 클립과 함께 움직인다(세트 이동).
+    """클립 순서를 바꾼다. 각 클립의 컷·자막·배속 구간·나눈 지점·배치 조각은 클립과 함께 움직인다(세트 이동).
 
     클립 경계를 넘는 직접 만든 컷은 클립별로 나누고, 경계를 넘는 자막은 시작한 클립 끝에서 자른다.
     """
@@ -168,8 +169,13 @@ def reorder(project: dict, order: list[str], groups: list[dict]) -> dict:
         c = clip_at(project, t)
         if c["offset"] + 1e-6 < t < c["offset"] + c["duration"] - 1e-6:  # 클립 경계는 어차피 조각의 경계다
             local_splits.append((c["id"], t - c["offset"]))
+    local_layout = []
+    for it in project.get("layout", []):
+        c = clip_at(project, (it["a"] + it["b"]) / 2)
+        local_layout.append((c["id"], it["a"] - c["offset"], it["b"] - c["offset"], it))
+    free_subs = [s for s in project["subtitles"] if s.get("free")]  # 결과 시간에 고정된 자막은 클립을 따라가지 않는다
     local_subs = []
-    for sub in project["subtitles"]:
+    for sub in (s for s in project["subtitles"] if not s.get("free")):
         # 자막이 기록해 둔 소속 클립을 우선 쓴다(경계에 딱 붙은 자막이 옆 클립으로 판정되는 것 방지)
         c = clips.get(sub.get("clip_id")) or clip_at(project, sub["start"])
         s = max(0.0, sub["start"] - c["offset"])
@@ -191,6 +197,8 @@ def reorder(project: dict, order: list[str], groups: list[dict]) -> dict:
     project["cuts"] = sorted(({**cut, "clip_id": cid, "start": round(off[cid] + s, 3), "end": round(off[cid] + e, 3)}
                               for cid, s, e, cut in local_cuts), key=lambda c: c["start"])
     project["splits"] = sorted(round(off[cid] + s, 3) for cid, s in local_splits)
+    project["layout"] = [{**it, "a": round(off[cid] + a, 3), "b": round(off[cid] + b, 3)}
+                         for cid, a, b, it in local_layout]  # E 순서는 그대로, 원본 구간만 새 위치로
     project["speed_ranges"] = sorted(
         ({**r, "start": round(off[cid] + s, 3), "end": round(off[cid] + e, 3)} for cid, s, e, r in local_speeds),
         key=lambda r: r["start"])
@@ -199,7 +207,7 @@ def reorder(project: dict, order: list[str], groups: list[dict]) -> dict:
         delta = off[cid] + s - sub["start"]
         subs.append({**sub, "clip_id": cid, "start": round(off[cid] + s, 3), "end": round(off[cid] + e, 3),
                      "words": shift_words(sub.get("words", []), delta)})
-    project["subtitles"] = sorted(subs, key=lambda x: x["start"])
+    project["subtitles"] = sorted(subs + free_subs, key=lambda x: x["start"])
     project["groups"] = groups
     return project
 

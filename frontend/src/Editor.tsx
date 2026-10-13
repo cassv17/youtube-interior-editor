@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type Cut, type Group, type Project, type SilenceParams } from "./api";
+import { api, type Cut, type Group, type Project, type SilenceParams, type Subtitle } from "./api";
 import ExportDialog from "./ExportDialog";
 import Inspector, { type EditDoc } from "./Inspector";
 import Timeline, { newCut, newSub, type Doc, type Selection } from "./Timeline";
 import { useHistory } from "./useHistory";
 import VideoPreview from "./VideoPreview";
+import ArrangeTimeline, { type ArrangeSelection } from "./ArrangeTimeline";
+import { isDefaultLayout, moveItem, placeItems, pToE, eToP, reconcile, setGap, subInstances, type Item } from "./layout";
 import { adjacentCut, computePieces, edgeKind, reviveRange, type Piece } from "./pieces";
-import { clamp, fmt, outputTime, snap, uid } from "./time";
+import { clamp, fmt, snap, uid } from "./time";
+import { useArrangePlayback } from "./useArrangePlayback";
 
 type SaveState = "saved" | "pending" | "saving" | "error";
 
@@ -29,11 +32,24 @@ interface EditorProps {
   onFinished: () => void; // 완료 처리 후
 }
 
+const sameItems = (x: Item[], y: Item[]) =>
+  x.length === y.length && x.every((a, i) => a.id === y[i].id && Math.abs(a.a - y[i].a) < 1e-6 && Math.abs(a.b - y[i].b) < 1e-6 && Math.abs(a.gap - y[i].gap) < 1e-6);
+
 const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 
 export default function Editor({ project, onBack, onReload, onFinished }: EditorProps) {
-  const hist = useHistory<EditDoc>({ cuts: project.cuts, subtitles: project.subtitles, speeds: project.speed_ranges ?? [], splits: project.splits ?? [], style: project.style });
+  // 컷·나눈 지점이 바뀔 때마다 결과 배치(조각 순서·빈칸)를 새 조각에 맞춘다
+  const normalize = (d: EditDoc): EditDoc => {
+    const k = computePieces(project.duration, d.cuts, d.splits, project.clips.slice(1).map((c) => c.offset)).map((x) => ({ a: x.start, b: x.end }));
+    const next = reconcile(d.layout, k);
+    return sameItems(next, d.layout) ? d : { ...d, layout: next };
+  };
+  const hist = useHistory<EditDoc>(
+    { cuts: project.cuts, subtitles: project.subtitles, speeds: project.speed_ranges ?? [], splits: project.splits ?? [], layout: project.layout ?? [], style: project.style },
+    normalize,
+  );
   const doc = hist.present;
+  const payload = (d: EditDoc) => ({ ...d, layout: isDefaultLayout(d.layout) ? [] : d.layout });
   const [meta, setMeta] = useState(project); // 클립 분석값·무음 설정 등 (재감지 시 갱신)
   const [wave, setWave] = useState<{ frame_sec: number; db: number[] } | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
@@ -53,17 +69,29 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
 
   const cutsMerged = useMemo(() => mergedCuts(doc.cuts), [doc.cuts]);
   const removed = cutsMerged.reduce((a, [s, e]) => a + (e - s), 0);
-  const resultDuration = useMemo(
-    () => outputTime(project.duration, cutsMerged, doc.speeds),
-    [project.duration, cutsMerged, doc.speeds],
+  const { placed, total } = useMemo(() => placeItems(doc.layout, doc.speeds), [doc.layout, doc.speeds]);
+  const resultDuration = total;
+  const layoutIsDefault = isDefaultLayout(doc.layout);
+  const pieces = useMemo<Piece[]>(
+    () => [...doc.layout].sort((x, y) => x.a - y.a).map((i) => ({ id: i.id, start: i.a, end: i.b })),
+    [doc.layout],
   );
-  const pieces = useMemo(
-    () => computePieces(project.duration, doc.cuts, doc.splits, project.clips.slice(1).map((c) => c.offset)),
-    [project.duration, project.clips, doc.cuts, doc.splits],
-  );
+  const [view, setView] = useState<"source" | "arrange">("source");
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const [magnet, setMagnet] = useState(true);
+  const [ppsE, setPpsE] = useState(40);
+  const [multiSubs, setMultiSubs] = useState<string[]>([]);
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const arrange = useArrangePlayback(video, placed, total, view === "arrange");
+  const subInst = useMemo(() => subInstances(placed, doc.subtitles), [placed, doc.subtitles]);
+  const arrangeSub = useMemo(() => {
+    const hit = subInst.find((i) => arrange.time >= i.e0 && arrange.time < i.e1);
+    return hit ? doc.subtitles.find((s) => s.id === hit.id) ?? null : null;
+  }, [subInst, arrange.time, doc.subtitles]);
   const curSpeed = doc.speeds.find((r) => time >= r.start && time < r.end)?.speed ?? 1;
   const inCut = cutsMerged.find(([s, e]) => time >= s && time < e);
-  const currentSub = doc.subtitles.find((s) => time >= s.start && time < s.end) ?? null;
+  const currentSub = doc.subtitles.find((s) => !s.free && time >= s.start && time < s.end) ?? null;
 
   useEffect(() => {
     api.waveform(project.id).then(setWave).catch(() => setWave(null));
@@ -80,7 +108,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
     const timer = setTimeout(async () => {
       setSave("saving");
       try {
-        await api.saveEdits(project.id, doc);
+        await api.saveEdits(project.id, payload(doc));
         setSave("saved");
         setSavedAt(hhmm(new Date()));
         setSaveErr("");
@@ -115,6 +143,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
     // 재생 중에만 25ms마다 확인한다(정지 상태에서는 이벤트로만 갱신).
     // requestAnimationFrame은 창이 가려지면 멈춰서 컷 건너뛰기를 놓칠 수 있어 타이머를 쓴다.
     const tick = () => {
+      if (viewRef.current !== "source") return;
       let t = v.currentTime;
       if (skipRef.current) {
         const hit = cutsRef.current.find(([s, e]) => t >= s && t < e - 0.02);
@@ -129,16 +158,20 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
       setTime(t);
     };
     const onPlay = () => {
+      if (viewRef.current !== "source") return;
       setPlaying(true);
       clearInterval(timer);
       timer = window.setInterval(tick, 25);
     };
     const onStop = () => {
+      if (viewRef.current !== "source") return;
       setPlaying(false);
       clearInterval(timer);
       setTime(v.currentTime);
     };
-    const onSeek = () => setTime(v.currentTime);
+    const onSeek = () => {
+      if (viewRef.current === "source") setTime(v.currentTime);
+    };
     v.addEventListener("play", onPlay);
     v.addEventListener("pause", onStop);
     v.addEventListener("ended", onStop);
@@ -167,9 +200,122 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
   }, []);
 
   const playFrom = useCallback((t: number) => {
+    if (viewRef.current === "arrange") {
+      arrange.seek(t); // 결과 배치 보기에서는 결과 시간
+      arrange.play();
+      return;
+    }
     seek(t);
     video.current?.play();
-  }, [seek]);
+  }, [seek, arrange.seek, arrange.play]);
+
+  const togglePlayAny = useCallback(() => (viewRef.current === "arrange" ? arrange.toggle() : togglePlay()), [arrange.toggle, togglePlay]);
+
+  // ---------- 보기 전환 (원본 기준 ↔ 결과 배치) ----------
+  const switchView = (v: "source" | "arrange") => {
+    if (v === view) return;
+    video.current?.pause();
+    if (video.current) video.current.playbackRate = 1;
+    if (v === "arrange") {
+      const e = pToE(placed, time) ?? 0;
+      setView(v);
+      viewRef.current = v;
+      arrange.seek(e);
+      if (selection && selection.kind !== "piece" && selection.kind !== "sub") setSelection(null);
+    } else {
+      const hit = eToP(placed, arrange.time);
+      setView(v);
+      viewRef.current = v;
+      if (hit) seek(hit.p);
+    }
+  };
+
+  // ---------- 결과 배치 편집 ----------
+  const setLayout = useCallback((items: Item[], record: boolean) => hist.set((d) => ({ ...d, layout: items }), record), [hist.set]);
+
+  const movePieceTo = (id: string, startE: number) => {
+    const r = moveItem(doc.layout, doc.speeds, id, startE, { magnet: false, threshold: 0 });
+    setLayout(r.items, true);
+  };
+
+  const setPieceGap = (id: string, gap: number) => setLayout(setGap(doc.layout, id, gap), true);
+
+  const resetLayout = () => {
+    if (!confirm("조각 순서와 빈칸을 처음 상태(원본 순서, 빈칸 없음)로 되돌립니다. 진행할까요?")) return;
+    hist.set((d) => ({ ...d, layout: [...d.layout].sort((x, y) => x.a - y.a).map((i) => ({ ...i, gap: 0 })) }));
+  };
+
+  const moveFreeSub = useCallback((id: string, e0: number, e1: number, record: boolean) =>
+    hist.set((d) => ({ ...d, subtitles: d.subtitles.map((s) => (s.id === id ? { ...s, e_start: e0, e_end: e1 } : s)) }), record), [hist.set]);
+
+  const subRange = (id: string): [number, number] | null => {
+    const xs = subInst.filter((i) => i.id === id);
+    return xs.length ? [Math.min(...xs.map((i) => i.e0)), Math.max(...xs.map((i) => i.e1))] : null;
+  };
+
+  /** 우클릭 → 그룹 해제: 조각을 따라가던 자막을 지금 결과 위치에 고정한다 */
+  const detachSub = (id: string) => {
+    const r = subRange(id);
+    if (!r) return;
+    hist.set((d) => ({ ...d, subtitles: d.subtitles.map((s) => (s.id === id ? { ...s, free: true, e_start: r[0], e_end: r[1] } : s)) }));
+  };
+
+  /** 분리된 자막을 그 시간에 놓인 조각에 다시 붙인다 */
+  const attachSub = (id: string) => {
+    const s = doc.subtitles.find((x) => x.id === id);
+    if (!s || s.e_start == null || s.e_end == null) return;
+    const a = eToP(placed, s.e_start + 1e-3) ?? placed.map((it) => ({ item: it, p: it.a })).find((h) => placed[placed.indexOf(h.item)].e0 >= (s.e_start ?? 0)) ?? null;
+    const b = eToP(placed, s.e_end - 1e-3);
+    if (!a) {
+      alert("이 자막이 놓인 자리에 조각이 없어 붙일 수 없습니다. 조각 위로 옮긴 뒤 다시 시도해 주세요.");
+      return;
+    }
+    const start = snap(a.p);
+    const end = snap(b && b.item === a.item ? b.p : Math.min(a.item.b, start + (s.e_end - s.e_start)));
+    hist.set((d) => ({
+      ...d,
+      subtitles: d.subtitles.map((x) => {
+        if (x.id !== id) return x;
+        const { free: _f, e_start: _s, e_end: _e, ...rest } = x;
+        return { ...rest, start, end: Math.max(end, start + 0.1) };
+      }),
+    }));
+  };
+
+  /** 선택한 자막 여러 개를 하나로 합친다(문장을 이어 붙임) */
+  const mergeSubs = (ids: string[]) => {
+    const picked = ids
+      .map((id) => ({ s: doc.subtitles.find((x) => x.id === id), r: subRange(id) ?? (() => { const f = doc.subtitles.find((x) => x.id === id); return f?.e_start != null && f.e_end != null ? ([f.e_start, f.e_end] as [number, number]) : null; })() }))
+      .filter((x): x is { s: Subtitle; r: [number, number] } => !!x.s && !!x.r)
+      .sort((x, y) => x.r[0] - y.r[0]);
+    if (picked.length < 2) return;
+    const first = picked[0].s;
+    const e0 = Math.min(...picked.map((x) => x.r[0]));
+    const e1 = Math.max(...picked.map((x) => x.r[1]));
+    const text = picked.map((x) => x.s.text.trim()).filter(Boolean).join(" ");
+    const keep = new Set(picked.map((x) => x.s.id));
+    hist.set((d) => ({
+      ...d,
+      subtitles: d.subtitles
+        .filter((x) => !keep.has(x.id) || x.id === first.id)
+        .map((x) => (x.id === first.id ? { ...x, text, words: [], needs_review: false, review_reasons: [], free: true, e_start: e0, e_end: e1 } : x)),
+    }));
+    setSelection({ kind: "sub", id: first.id });
+    setMultiSubs([]);
+  };
+
+  const onArrangeSelect = (s: ArrangeSelection, additive?: boolean) => {
+    if (s?.kind === "sub" && additive) {
+      setMultiSubs((prev) => {
+        const base = prev.length || !selection || selection.kind !== "sub" ? prev : [selection.id];
+        return base.includes(s.id) ? base.filter((x) => x !== s.id) : [...base, s.id];
+      });
+      return;
+    }
+    setMultiSubs([]);
+    setSelection(s);
+    if (s?.kind === "piece" && video.current) video.current.pause();
+  };
 
   // ---------- 편집 동작 ----------
   const updateTimeline = useCallback(
@@ -184,7 +330,16 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
   }, [hist.set]);
 
   const splitAtPlayhead = () => {
-    const t = snap(video.current?.currentTime ?? time);
+    let src = video.current?.currentTime ?? time;
+    if (viewRef.current === "arrange") {
+      const hit = eToP(placed, arrange.time);
+      if (!hit) {
+        alert("빈칸에서는 나눌 수 없습니다. 조각 안으로 재생 위치를 옮긴 뒤 다시 눌러 주세요.");
+        return;
+      }
+      src = hit.p;
+    }
+    const t = snap(src);
     const f = 1 / 30 - 1e-4;
     const inside = pieces.find((pc) => t - pc.start >= f && pc.end - t >= f);
     if (!inside) {
@@ -287,28 +442,34 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
       if (typing) return;
       if (e.key === " ") {
         e.preventDefault();
-        togglePlay();
+        togglePlayAny();
+      } else if (e.key.toLowerCase() === "m" && !mod && viewRef.current === "arrange") {
+        e.preventDefault();
+        setMagnet((v) => !v);
       } else if (e.key.toLowerCase() === "s" && !mod) {
         e.preventDefault();
         splitRef.current();
       } else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         deleteSelected();
-      } else if (e.key === "ArrowLeft") {
-        seek((video.current?.currentTime ?? 0) - (e.shiftKey ? 1 / 30 : 1));
-      } else if (e.key === "ArrowRight") {
-        seek((video.current?.currentTime ?? 0) + (e.shiftKey ? 1 / 30 : 1));
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        const d = (e.key === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? 1 / 30 : 1);
+        if (viewRef.current === "arrange") arrange.seek(arrange.time + d);
+        else seek((video.current?.currentTime ?? 0) + d);
       } else if (e.key === "Escape") {
         setSelection(null);
+        setMultiSubs([]);
+        setMenu(null);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [hist.undo, hist.redo, togglePlay, deleteSelected, seek]);
+  }, [hist.undo, hist.redo, togglePlayAny, deleteSelected, seek, arrange.seek, arrange.time]);
 
   const fitAll = () => {
     const w = document.querySelector(".tl-scroll")?.clientWidth ?? 1000;
-    setPps(clamp((w - 20) / project.duration, 2, 600));
+    if (view === "arrange") setPpsE(clamp((w - 20) / Math.max(total + 2, 5), 2, 600));
+    else setPps(clamp((w - 20) / project.duration, 2, 600));
   };
 
   const saveLabel = {
@@ -322,7 +483,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
   const flush = useCallback(async () => {
     setSave("saving");
     try {
-      await api.saveEdits(project.id, doc);
+      await api.saveEdits(project.id, payload(doc));
       setSave("saved");
       setSavedAt(hhmm(new Date()));
       setSaveErr("");
@@ -404,26 +565,31 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
             src={api.proxyUrl(project.id, project.proxy)}
             aspect={project.output.width / project.output.height}
             style={doc.style}
-            subtitle={currentSub}
-            inCut={!!inCut && !skipCuts}
-            speed={applySpeed ? curSpeed : 1}
-            onClick={togglePlay}
+            subtitle={view === "arrange" ? arrangeSub : currentSub}
+            inCut={view === "source" && !!inCut && !skipCuts}
+            speed={view === "source" && applySpeed ? curSpeed : 1}
+            blank={view === "arrange" && arrange.blank}
+            onClick={togglePlayAny}
           />
           <div className="controls">
-            <button className="play" onClick={togglePlay}>{playing ? "❚❚" : "▶"}</button>
-            <span className="clock">{fmt(time, 2)} / {fmt(project.duration, 1)}</span>
+            <button className="play" onClick={togglePlayAny}>{(view === "arrange" ? arrange.playing : playing) ? "❚❚" : "▶"}</button>
+            <span className="clock">
+              {view === "arrange" ? `${fmt(arrange.time, 2)} / ${fmt(total, 1)}` : `${fmt(time, 2)} / ${fmt(project.duration, 1)}`}
+            </span>
             <button onClick={splitAtPlayhead} title="재생 위치를 1프레임 단위로 나눕니다 (S)">✂ 여기서 나누기</button>
-            <label className="check">
-              <input type="checkbox" checked={skipCuts} onChange={(e) => setSkipCuts(e.target.checked)} />
-              컷 적용해서 보기 (잘릴 구간 건너뛰기)
-            </label>
-            {doc.speeds.length > 0 && (
+            {view === "source" && (
+              <label className="check">
+                <input type="checkbox" checked={skipCuts} onChange={(e) => setSkipCuts(e.target.checked)} />
+                컷 적용해서 보기 (잘릴 구간 건너뛰기)
+              </label>
+            )}
+            {view === "source" && doc.speeds.length > 0 && (
               <label className="check">
                 <input type="checkbox" checked={applySpeed} onChange={(e) => { setApplySpeed(e.target.checked); if (!e.target.checked && video.current) video.current.playbackRate = 1; }} />
                 배속 적용해서 보기
               </label>
             )}
-            <span className="result">결과 길이 <b>{fmt(resultDuration)}</b> ({removed.toFixed(1)}초 제거{doc.speeds.length ? " · 배속 반영" : ""})</span>
+            <span className="result">결과 길이 <b>{fmt(resultDuration)}</b> ({removed.toFixed(1)}초 제거{doc.speeds.length ? " · 배속 반영" : ""}{layoutIsDefault ? "" : " · 배치 반영"})</span>
           </div>
         </section>
         <Inspector
@@ -434,8 +600,14 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
           analysis={meta.clip_analysis}
           silence={meta.silence_params}
           selection={selection}
-          time={time}
+          time={view === "arrange" ? arrange.time : time}
           update={(fn, record) => hist.set(fn, record)}
+          view={view}
+          placed={placed}
+          onMovePiece={movePieceTo}
+          onSetGap={setPieceGap}
+          onResetLayout={resetLayout}
+          layoutIsDefault={layoutIsDefault}
           begin={hist.begin}
           end={hist.end}
           onSelect={setSelection}
@@ -467,10 +639,22 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
       )}
 
       <div className="tl-bar">
+        <span className="view-switch" role="group" aria-label="타임라인 보기">
+          <button className={view === "source" ? "on" : ""} onClick={() => switchView("source")} title="원본 순서대로 보면서 컷·자막·배속을 편집합니다">원본 기준 (컷 편집)</button>
+          <button className={view === "arrange" ? "on" : ""} onClick={() => switchView("arrange")} title="결과 영상 순서로 보면서 조각을 끌어 옮기고 빈칸을 둡니다">결과 배치</button>
+        </span>
         <span>확대</span>
-        <input type="range" min={2} max={300} value={pps} onChange={(e) => setPps(+e.target.value)} />
+        <input type="range" min={2} max={300} value={view === "arrange" ? ppsE : pps} onChange={(e) => (view === "arrange" ? setPpsE(+e.target.value) : setPps(+e.target.value))} />
         <button onClick={fitAll}>전체 보기</button>
-        {selectedClips.length > 0 ? (
+        {view === "arrange" ? (
+          <span className="clip-tools">
+            <button className={magnet ? "on magnet" : "magnet"} onClick={() => setMagnet((v) => !v)} title="켜면 조각이 0초·재생 위치·옆 조각 가장자리에 가까울 때 달라붙습니다 (M)">
+              🧲 자석 {magnet ? "켬" : "끔"}
+            </button>
+            <button onClick={resetLayout} disabled={layoutIsDefault}>배치 초기화</button>
+            {multiSubs.length > 1 && <button onClick={() => mergeSubs(multiSubs)}>선택한 자막 {multiSubs.length}개 합치기</button>}
+          </span>
+        ) : selectedClips.length > 0 ? (
           <span className="clip-tools">
             클립 {selectedClips.length}개 선택
             <button onClick={makeGroup} disabled={selectedClips.length < 2} title="Ctrl+클릭으로 2개 이상 고르세요">🔗 그룹으로 묶기</button>
@@ -480,10 +664,38 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
         ) : (
           <span>클립: 끌어서 순서 변경 · Ctrl+클릭으로 여러 개 선택 후 그룹</span>
         )}
-        <span className="legend">
-          <i className="lg-cut" /> 잘릴 구간 <i className="lg-off" /> 제안(꺼짐, 더블클릭으로 적용) <i className="lg-review" /> 확인 필요
-        </span>
+        {view === "source" ? (
+          <span className="legend">
+            <i className="lg-cut" /> 잘릴 구간 <i className="lg-off" /> 제안(꺼짐, 더블클릭으로 적용) <i className="lg-review" /> 확인 필요
+          </span>
+        ) : (
+          <span className="legend">조각을 끌어 옮기세요 · Ctrl+클릭으로 자막 여러 개 선택 · S 나누기 · M 자석</span>
+        )}
       </div>
+      {view === "arrange" ? (
+        <ArrangeTimeline
+          items={doc.layout}
+          placed={placed}
+          total={total}
+          speeds={doc.speeds}
+          subs={subInst}
+          wave={wave}
+          time={arrange.time}
+          playing={arrange.playing}
+          pps={ppsE}
+          setPps={setPpsE}
+          magnet={magnet}
+          selection={selection && (selection.kind === "piece" || selection.kind === "sub") ? { kind: selection.kind, id: selection.id } : null}
+          multiSubs={multiSubs}
+          onSelect={onArrangeSelect}
+          onSeek={arrange.seek}
+          onLayout={setLayout}
+          onMoveFreeSub={moveFreeSub}
+          onSubMenu={(id, x, y) => setMenu({ id, x, y })}
+          begin={hist.begin}
+          end={hist.end}
+        />
+      ) : (
       <Timeline
         duration={project.duration}
         clips={project.clips}
@@ -506,6 +718,29 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
         onReorder={(order) => applyOrder(order, groups)}
         onRenameGroup={renameGroup}
       />
+      )}
+      {menu && (() => {
+        const s = doc.subtitles.find((x) => x.id === menu.id);
+        if (!s) return null;
+        const multi = multiSubs.length > 1 && multiSubs.includes(menu.id);
+        const close = () => setMenu(null);
+        return (
+          <>
+            <div className="ctx-bg" onPointerDown={close} onContextMenu={(e) => { e.preventDefault(); close(); }} />
+            <div className="ctx-menu" style={{ left: menu.x, top: menu.y }}>
+              <div className="ctx-title">{s.text.slice(0, 24)}</div>
+              {multi && <button onClick={() => { mergeSubs(multiSubs); close(); }}>선택한 자막 {multiSubs.length}개 합치기</button>}
+              {s.free ? (
+                <button onClick={() => { attachSub(menu.id); close(); }}>조각에 다시 붙이기 (그룹에 넣기)</button>
+              ) : (
+                <button onClick={() => { detachSub(menu.id); close(); }}>그룹 해제 (조각에서 분리)</button>
+              )}
+              <button onClick={() => { hist.set((d) => ({ ...d, subtitles: d.subtitles.filter((x) => x.id !== menu.id) })); setSelection(null); close(); }}>자막 삭제</button>
+              {!multi && <div className="ctx-hint">Ctrl+클릭으로 자막을 여러 개 고르면 '합치기'가 나옵니다</div>}
+            </div>
+          </>
+        );
+      })()}
     </div>
   );
 }

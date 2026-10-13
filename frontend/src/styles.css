@@ -248,3 +248,33 @@ ul.files a:hover { text-decoration: underline; }
 .piece .h.cut:hover { background: rgba(255, 176, 32, 0.8); }
 .piece .h.split:hover { background: rgba(255, 255, 255, 0.7); }
 .piece .h.fixed:hover { background: rgba(255, 77, 77, 0.6); }
+
+/* 결과 배치 */
+.view-switch { display: inline-flex; gap: 0; margin-right: 8px; }
+.view-switch button { border-radius: 0; }
+.view-switch button:first-child { border-radius: 6px 0 0 6px; }
+.view-switch button:last-child { border-radius: 0 6px 6px 0; }
+.view-switch button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.magnet.on { background: rgba(255, 224, 77, 0.2); border-color: #ffe14d; color: #ffe14d; }
+.arr-pieces { cursor: default; }
+.arr-piece {
+  position: absolute; top: 4px; bottom: 4px; display: flex; align-items: center; gap: 6px; padding: 0 8px;
+  background: rgba(111, 220, 155, 0.28); border: 1px solid #5fbf8a; border-radius: 4px; cursor: grab; overflow: hidden; white-space: nowrap;
+}
+.arr-piece b { background: #2f7a57; color: #fff; border-radius: 3px; padding: 0 5px; font-size: 11px; }
+.arr-piece span { font-size: 11px; color: var(--text); pointer-events: none; }
+.arr-piece.sel { background: rgba(111, 220, 155, 0.5); outline: 2px solid #fff; outline-offset: -2px; z-index: 2; }
+.arr-piece:active { cursor: grabbing; }
+.arr-gap {
+  position: absolute; top: 4px; bottom: 4px; border: 1px dashed var(--line); border-radius: 4px; pointer-events: none;
+  background: repeating-linear-gradient(135deg, rgba(255,255,255,0.04) 0 6px, transparent 6px 12px); color: var(--muted); font-size: 11px;
+  display: flex; align-items: center; justify-content: center; overflow: hidden; white-space: nowrap;
+}
+.snap-line { position: absolute; top: 0; width: 0; border-left: 2px solid #ffe14d; pointer-events: none; z-index: 6; }
+.blank-flag { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #666; font-size: 14px; pointer-events: none; }
+.sub.free { background: rgba(160, 120, 255, 0.35); border: 1px dashed #b49bff; }
+.ctx-bg { position: fixed; inset: 0; z-index: 50; }
+.ctx-menu { position: fixed; z-index: 51; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px; min-width: 220px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); display: flex; flex-direction: column; gap: 4px; }
+.ctx-menu button { text-align: left; }
+.ctx-title { font-size: 12px; color: var(--muted); padding: 2px 6px; }
+.ctx-hint { font-size: 11px; color: var(--muted); padding: 2px 6px; }

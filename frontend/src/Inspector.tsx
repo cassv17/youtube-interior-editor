@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { ClipAnalysis, Clip, Cut, SilenceParams, SpeedRange, Style, Subtitle } from "./api";
+import type { ClipAnalysis, Clip, Cut, LayoutItem, SilenceParams, SpeedRange, Style, Subtitle } from "./api";
+import type { Placed } from "./layout";
 import type { Selection } from "./Timeline";
 import { adjacentCut, edgeKind, type Piece } from "./pieces";
 import { fmt, snap } from "./time";
@@ -9,6 +10,7 @@ export interface EditDoc {
   subtitles: Subtitle[];
   speeds: SpeedRange[];
   splits: number[];
+  layout: LayoutItem[];
   style: Style;
 }
 
@@ -29,6 +31,12 @@ interface Props {
   onAddCut: () => void;
   onAddSub: () => void;
   onAddSpeed: () => void;
+  view: "source" | "arrange";
+  placed: Placed[];
+  onMovePiece: (id: string, startE: number) => void;
+  onSetGap: (id: string, gap: number) => void;
+  onResetLayout: () => void;
+  layoutIsDefault: boolean;
   pieces: Piece[];
   onSplit: () => void;
   onDeletePiece: (pc: Piece) => void;
@@ -104,6 +112,12 @@ function Overview(p: Props) {
         <button onClick={p.onAddSub}>＋ 현재 위치에 자막</button>
         <button onClick={p.onAddSpeed}>＋ 현재 위치에 배속</button>
       </div>
+      {!p.layoutIsDefault && (
+        <div className="reasons">
+          조각 순서를 바꾸거나 빈칸을 둔 상태입니다. 결과 영상은 '결과 배치' 보기의 순서를 따릅니다.
+          <button onClick={p.onResetLayout}>배치 초기화 (원본 순서·빈칸 없음)</button>
+        </div>
+      )}
       {p.doc.speeds.length > 0 && (
         <>
           <h4>배속 구간</h4>
@@ -210,9 +224,17 @@ function SubEditor(p: Props & { sub: Subtitle }) {
         onChange={(e) => patch((x) => ({ ...x, text: e.target.value }))}
       />
       <div className="count">{s.text.length}자</div>
-      <TimeFields start={s.start} end={s.end} min={prevEnd} max={nextStart} onChange={(a, b) => patch((x) => ({ ...x, start: a, end: b }))} />
+      {s.free ? (
+        <>
+          <TimeFields start={s.e_start ?? 0} end={s.e_end ?? 0} min={0} max={1e5}
+            onChange={(a, b) => patch((x) => ({ ...x, e_start: a, e_end: b }))} />
+          <p className="hint">🔓 조각에서 분리된 자막입니다. 위 시간은 <b>결과 영상 기준</b>이며, 조각을 옮겨도 이 자리에 머뭅니다. 결과 배치 보기에서 우클릭 → '조각에 다시 붙이기'로 되돌릴 수 있습니다.</p>
+        </>
+      ) : (
+        <TimeFields start={s.start} end={s.end} min={prevEnd} max={nextStart} onChange={(a, b) => patch((x) => ({ ...x, start: a, end: b }))} />
+      )}
       <div className="row">
-        <button onClick={() => p.onPlayFrom(s.start)}>▶ 이 자막부터 재생</button>
+        <button onClick={() => p.onPlayFrom(s.free ? (s.e_start ?? 0) : s.start)}>▶ 이 자막부터 재생</button>
         <button className="danger" onClick={() => { p.update((d) => ({ ...d, subtitles: d.subtitles.filter((x) => x.id !== s.id) })); p.onSelect(null); }}>삭제</button>
       </div>
       <Reasons reasons={s.review_reasons} onResolve={() => patch((x) => ({ ...x, needs_review: false, review_reasons: [] }))} />
@@ -266,6 +288,9 @@ function CutEditor(p: Props & { cut: Cut }) {
 
 function PieceEditor(p: Props & { piece: Piece }) {
   const pc = p.piece;
+  const idx = p.placed.findIndex((x) => x.id === pc.id);
+  const pl = idx >= 0 ? p.placed[idx] : null;
+  const gapOf = idx >= 0 ? p.doc.layout.find((x) => x.id === pc.id)?.gap ?? 0 : 0;
   const label = (side: "l" | "r") => {
     const kind = edgeKind(side, pc, p.doc.cuts, p.doc.splits);
     const word = side === "l" ? "앞" : "뒤";
@@ -279,13 +304,28 @@ function PieceEditor(p: Props & { piece: Piece }) {
   const l = label("l"), r = label("r");
   return (
     <div className="editor">
-      <h3>조각 <small>{fmt(pc.start, 2)} ~ {fmt(pc.end, 2)}</small></h3>
+      <h3>조각 <small>원본 {fmt(pc.start, 2)} ~ {fmt(pc.end, 2)}</small></h3>
       <dl className="stats">
-        <dt>길이</dt><dd>{(pc.end - pc.start).toFixed(2)}초 ({Math.round((pc.end - pc.start) * 30)}프레임)</dd>
+        <dt>원본 길이</dt><dd>{(pc.end - pc.start).toFixed(2)}초 ({Math.round((pc.end - pc.start) * 30)}프레임)</dd>
+        {pl && <><dt>결과 길이</dt><dd>{(pl.e1 - pl.e0).toFixed(2)}초</dd></>}
       </dl>
+      {pl && (
+        <>
+          <h4>결과 영상에서의 위치</h4>
+          <div className="time-fields">
+            <label>시작(초)<NumField value={pl.e0} onCommit={(v) => { const n = parseFloat(v); if (isFinite(n)) p.onMovePiece(pc.id, n); }} /></label>
+            <label>앞 빈칸(초)<NumField value={gapOf} onCommit={(v) => { const n = parseFloat(v); if (isFinite(n)) p.onSetGap(pc.id, n); }} /></label>
+            <span className="len">{pl.e1.toFixed(2)}초에 끝남</span>
+          </div>
+          <div className="row">
+            <button disabled={gapOf <= 0.0001} onClick={() => p.onSetGap(pc.id, 0)}>앞 빈칸 없애기(붙이기)</button>
+          </div>
+          <p className="hint">타임라인에서 조각을 끌어 옮길 수도 있습니다. 빈칸은 결과 영상에서 검은 화면·무음으로 들어갑니다. 자석 버튼을 끄면 원하는 위치에 자유롭게 둘 수 있습니다.</p>
+        </>
+      )}
       <div className="row">
         <button className="danger" onClick={() => p.onDeletePiece(pc)}>✂ 이 조각 지우기</button>
-        <button onClick={() => p.onPlayFrom(pc.start)}>▶ 이 조각 재생</button>
+        <button onClick={() => p.view === "arrange" && pl ? p.onPlayFrom(pl.e0) : p.onPlayFrom(pc.start)}>▶ 이 조각 재생</button>
       </div>
       <h4>이어 붙이기</h4>
       <div className="row">

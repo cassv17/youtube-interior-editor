@@ -24,7 +24,11 @@ export type EdgeKind = "cut" | "split" | "fixed";
 
 /** 켜진 컷을 합친 목록 */
 export function mergedRanges(cuts: CutLike[]): [number, number][] {
-  const on = cuts.filter((c) => c.enabled).map((c) => [c.start, c.end] as [number, number]).sort((a, b) => a[0] - b[0]);
+  const on = cuts
+    .filter((c) => c.enabled)
+    .map((c) => [snap(c.start), snap(c.end)] as [number, number])
+    .filter(([s, e]) => e > s)
+    .sort((a, b) => a[0] - b[0]);
   const out: [number, number][] = [];
   for (const [s, e] of on) {
     const last = out[out.length - 1];

@@ -8,6 +8,7 @@ interface Props {
   subtitle: Subtitle | null;
   inCut: boolean;
   speed: number; // 지금 위치의 배속(1이면 표시 안 함)
+  blank?: boolean; // 결과 배치의 빈칸: 영상 대신 검은 화면
   onClick: () => void;
 }
 
@@ -39,7 +40,8 @@ const VideoPreview = forwardRef<HTMLVideoElement, Props>(function VideoPreview(p
 
   return (
     <div className="video-box" ref={box} onClick={p.onClick}>
-      <video ref={ref} src={p.src} preload="auto" playsInline />
+      <video ref={ref} src={p.src} preload="auto" playsInline style={p.blank ? { visibility: "hidden" } : undefined} />
+      {p.blank && <div className="blank-flag">빈칸 (검은 화면 · 무음)</div>}
       {p.inCut && <div className="cut-flag">✂ 잘릴 구간</div>}
       {p.speed !== 1 && !p.inCut && <div className="cut-flag speed-flag">⏩ {p.speed}배속</div>}
       {p.subtitle && (

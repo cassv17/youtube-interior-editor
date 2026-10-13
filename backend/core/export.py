@@ -11,7 +11,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from . import nle, render
+from . import layout as layout_mod, nle, render
 from .media import MediaError
 
 MIN_SPEED, MAX_SPEED = 0.5, 4.0
@@ -141,19 +141,67 @@ def map_time(t: float, cuts: list[tuple[float, float]],
     return out
 
 
-def remap_subtitles(project: dict, cuts: list[tuple[float, float]],
-                    speeds: list[tuple[float, float, float]] | None = None) -> list[dict]:
-    out = []
-    for sub in sorted(project["subtitles"], key=lambda s: s["start"]):
-        s, e = map_time(sub["start"], cuts, speeds), map_time(sub["end"], cuts, speeds)
-        if e - s < MIN_SUB or not sub["text"].strip():
+def _finish_subtitles(raw: list[tuple[float, float, str]]) -> list[dict]:
+    """결과 시간으로 옮긴 자막을 시간순으로 정리한다: 너무 짧거나 빈 것은 빼고, 겹치지 않게 한다."""
+    out: list[dict] = []
+    for s, e, text in sorted(raw):
+        if e - s < MIN_SUB or not text.strip():
             continue
         if out and s < out[-1]["end"]:  # 컷 때문에 붙은 자막끼리 겹치지 않게
             s = out[-1]["end"]
             if e - s < MIN_SUB:
                 continue
-        out.append({"start": round(s, 3), "end": round(e, 3), "text": sub["text"].strip()})
+        out.append({"start": round(s, 3), "end": round(e, 3), "text": text.strip()})
     return out
+
+
+def _free_subtitles(project: dict) -> list[tuple[float, float, str]]:
+    """조각에서 분리된 자막: 결과 시간(e_start~e_end)에 그대로 놓인다."""
+    out = []
+    for s in project["subtitles"]:
+        if s.get("free") and s.get("e_start") is not None and s.get("e_end") is not None:
+            out.append((float(s["e_start"]), float(s["e_end"]), s["text"]))
+    return out
+
+
+def remap_subtitles(project: dict, cuts: list[tuple[float, float]],
+                    speeds: list[tuple[float, float, float]] | None = None) -> list[dict]:
+    raw = [(map_time(s["start"], cuts, speeds), map_time(s["end"], cuts, speeds), s["text"])
+           for s in project["subtitles"] if not s.get("free")]
+    return _finish_subtitles(raw + _free_subtitles(project))
+
+
+def output_subtitles(project: dict) -> list[dict]:
+    """결과 영상 기준 자막. 배치(순서 바꿈·빈칸)가 있으면 조각 위치를 따라가고, 없으면 컷만 반영한다."""
+    speeds = merged_speeds(project)
+    items = layout_mod.items_of(project)
+    if items is None:
+        return remap_subtitles(project, merged_cuts(project), speeds)
+    placed, _ = layout_mod.place(items, speeds)
+    return _finish_subtitles(layout_mod.instances(placed, project["subtitles"]) + _free_subtitles(project))
+
+
+def layout_sequence(project: dict) -> list[tuple] | None:
+    """배치가 기본이 아니면 렌더링 순서(빈칸·조각)를 만든다. 기본이면 None(기존 방식 사용)."""
+    items = layout_mod.items_of(project)
+    if items is None:
+        return None
+    fps = project["output"]["fps"]
+    placed, _ = layout_mod.place(items, merged_speeds(project))
+    clips = [(c, _grid(c["offset"], fps)) for c in project["clips"]]
+    seq: list[tuple] = []
+    cursor = 0
+    for it in placed:
+        for at in it.atoms:
+            if at.f0 > cursor:
+                seq.append(("gap", at.f0 - cursor))
+            mid = (at.a + at.b) / 2
+            clip, c0 = next(((c, o) for c, o in clips if o - 1e-6 <= mid < o + c["duration"] + 1e-6), clips[-1])
+            s = max(0.0, at.a - c0)
+            e = min(clip["duration"], at.b - c0)
+            seq.append(("atom", clip, round(s, 6), round(e, 6), at.speed, at.f1 - at.f0))
+            cursor = at.f1
+    return seq
 
 
 # ---------- 자막 파일 ----------
@@ -231,15 +279,19 @@ def encode(project: dict, mp4: Path, burn: bool, progress=None) -> float:
     """
     cuts = merged_cuts(project)
     speeds = merged_speeds(project)
+    sequence = layout_sequence(project)
     segments = keep_pieces(project, cuts, speeds) if speeds else keep_segments(project, cuts)
-    subs = remap_subtitles(project, cuts, speeds)
+    subs = output_subtitles(project)
     w, h = project["output"]["width"], project["output"]["height"]
     files = {}
     vf = ""
     if burn and subs:
         files["subs.ass"] = to_ass(subs, project["style"], w, h)
         vf = "ass=subs.ass"
-    inputs, graph, total = render.build_inputs_and_graph(project, segments, render.even(w), render.even(h), vf)
+    if sequence:
+        inputs, graph, total = render.build_layout_graph(project, sequence, render.even(w), render.even(h), vf)
+    else:
+        inputs, graph, total = render.build_inputs_and_graph(project, segments, render.even(w), render.even(h), vf)
     common = ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
     used_qsv = render.qsv_available()
     try:
@@ -253,7 +305,7 @@ def encode(project: dict, mp4: Path, burn: bool, progress=None) -> float:
 
 
 def write_srt(project: dict, path: Path) -> int:
-    subs = remap_subtitles(project, merged_cuts(project), merged_speeds(project))
+    subs = output_subtitles(project)
     path.write_text(to_srt(subs), encoding="utf-8-sig")  # BOM: 윈도우 프로그램 한글 깨짐 방지
     return len(subs)
 
@@ -332,7 +384,8 @@ def write_xml(project: dict, pkg: Path, media: dict[str, Path]) -> Path:
     cuts = merged_cuts(project)
     speeds = merged_speeds(project)
     xml = pkg / f"{_safe(project.get('name', '영상'))}_프리미어_다빈치.xml"
-    xml.write_text(nle.to_xml(project, keep_pieces(project, cuts, speeds), media, project.get("name", "영상")),
+    xml.write_text(nle.to_xml(project, keep_pieces(project, cuts, speeds), media, project.get("name", "영상"),
+                           sequence=layout_sequence(project)),
                    encoding="utf-8")
     return xml
 

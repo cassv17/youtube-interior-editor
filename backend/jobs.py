@@ -548,6 +548,21 @@ def clean_splits(items, dur: float) -> list[float]:
     return sorted(out)
 
 
+def clean_layout(items, dur: float) -> list[dict]:
+    """결과 배치: 숫자·범위만 검증한다. 컷·나눈 지점과 맞는지는 내보낼 때 다시 확인하고, 안 맞으면 기본 배치를 쓴다."""
+    out: list[dict] = []
+    for x in items[:2000] if isinstance(items, list) else []:
+        try:
+            a, b = _num(x["a"], 0, dur), _num(x["b"], 0, dur)
+            gap = _num(x.get("gap", 0), 0, 1e5)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return []
+        if b - a < 0.02:
+            return []
+        out.append({"id": str(x.get("id") or f"pc-{len(out) + 1}")[:40], "a": a, "b": b, "gap": gap})
+    return out
+
+
 def apply_edits(pid: str, body: dict) -> dict:
     """화면에서 보낸 컷·자막·스타일을 검증해 저장한다."""
     with lock(pid):
@@ -574,14 +589,25 @@ def apply_edits(pid: str, body: dict) -> dict:
                 text = str(s.get("text", "")).strip()
                 if en - st < 0.05 or not text:
                     continue
-                subs.append({**s, "start": st, "end": en, "text": text,
-                             "clip_id": _owner(data, s, st),
-                             "words": list(s.get("words", []))})
+                sub = {**s, "start": st, "end": en, "text": text,
+                       "clip_id": _owner(data, s, st),
+                       "words": list(s.get("words", []))}
+                sub.pop("free", None)
+                sub.pop("e_start", None)
+                sub.pop("e_end", None)
+                if s.get("free"):  # 조각에서 분리된 자막: 결과 시간에 고정
+                    es, ee = _num(s.get("e_start", 0), 0, 1e5), _num(s.get("e_end", 0), 0, 1e5)
+                    if ee - es < 0.05:
+                        continue
+                    sub.update({"free": True, "e_start": es, "e_end": ee})
+                subs.append(sub)
             data["subtitles"] = sorted(subs, key=lambda s: s["start"])
         if "speeds" in body:
             data["speed_ranges"] = clean_speeds(body["speeds"], dur)
         if "splits" in body:
             data["splits"] = clean_splits(body["splits"], dur)
+        if "layout" in body:
+            data["layout"] = clean_layout(body["layout"], dur)
         if "style" in body:
             data["style"] = {k: body["style"].get(k, v) for k, v in proj_mod.DEFAULT_STYLE.items()}
         save(pid, data)

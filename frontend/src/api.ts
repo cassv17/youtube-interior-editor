@@ -37,6 +37,9 @@ export interface Subtitle {
   needs_review: boolean;
   review_reasons: string[];
   words: Word[];
+  free?: boolean; // 조각에서 분리된 자막: 결과 영상 시간(e_start~e_end)에 고정
+  e_start?: number;
+  e_end?: number;
 }
 
 export interface Style {
@@ -99,6 +102,14 @@ export interface Group {
   id: string;
   name: string;
   clips: string[];
+}
+
+/** 결과 배치의 조각: 원본 구간 [a, b]와 결과에서 그 앞에 두는 빈칸(초). 배열 순서가 결과 순서다. */
+export interface LayoutItem {
+  id: string;
+  a: number;
+  b: number;
+  gap: number;
 }
 
 export interface SpeedRange {
@@ -183,6 +194,7 @@ export interface Project {
   groups?: Group[];
   speed_ranges?: SpeedRange[];
   splits?: number[];
+  layout?: LayoutItem[];
   request?: RequestNote;
   reference?: ReferenceNote;
   proxy?: string;
@@ -240,7 +252,7 @@ export const api = {
     form.append("file", file, file.name);
     return request<ReferenceResult>("/api/reference", { method: "POST", body: form });
   },
-  saveEdits: (id: string, edits: { cuts: Cut[]; subtitles: Subtitle[]; speeds: SpeedRange[]; splits: number[]; style: Style }) =>
+  saveEdits: (id: string, edits: { cuts: Cut[]; subtitles: Subtitle[]; speeds: SpeedRange[]; splits: number[]; layout: LayoutItem[]; style: Style }) =>
     request<{ ok: boolean; updated: string }>(`/api/projects/${id}/edits`, json("PUT", edits)),
   redetect: (id: string, params: SilenceParams) =>
     request<Project>(`/api/projects/${id}/redetect`, json("POST", params)),

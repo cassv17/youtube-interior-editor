@@ -212,3 +212,55 @@ def make_proxy(project: dict, out_path: Path, progress=None, height: int = 540) 
         "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
     ], out_path, total, progress)
     return out_path
+
+
+def build_layout_graph(project: dict, sequence: list[tuple], w: int, h: int,
+                       video_filter: str = "") -> tuple[list[str], str, float]:
+    """결과 배치(순서 바꿈·빈칸)를 만든다. sequence 항목:
+      ("gap", 프레임수)
+      ("atom", 클립, 클립 기준 시작(초), 끝(초), 배속, 결과 프레임수)
+
+    조각마다 같은 파일을 따로 열어(-ss/-t) 필요한 부분만 읽는다. 순서가 뒤섞여도 한쪽으로 프레임이 쌓이지 않아
+    긴 영상에서도 메모리가 안정적이다. 길이는 모두 프레임 정수라 화면에서 본 위치와 영상 위치가 같다.
+    """
+    fps = project["output"]["fps"]
+    args: list[str] = []
+    parts: list[str] = []
+    labels: list[str] = []
+    n_in = 0
+    total_frames = 0
+    afmt = f"aresample={AUDIO_RATE},aformat=sample_fmts=fltp:channel_layouts=stereo"
+    for i, item in enumerate(sequence):
+        if item[0] == "gap":
+            n = int(item[1])
+            d = n / fps
+            parts.append(f"color=c=black:s={w}x{h}:r={fps}:d={d + 1:.6f},format=yuv420p,setsar=1,"
+                         f"trim=end_frame={n},setpts=N/{fps}/TB[v{i}]")
+            parts.append(f"anullsrc=r={AUDIO_RATE}:cl=stereo,{afmt},atrim=duration={d:.6f},asetpts=PTS-STARTPTS[a{i}]")
+        else:
+            _, clip, s, e, speed, n = item
+            n = int(n)
+            d = n / fps
+            args += ["-ss", f"{s:.6f}", "-t", f"{e - s + 0.2:.6f}", "-i", clip["path"]]
+            vi = n_in
+            n_in += 1
+            parts.append(f"[{vi}:v:0]setpts=(PTS-STARTPTS)/{speed:.6f},fps={fps},"
+                         f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,"
+                         f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={n},setpts=N/{fps}/TB[v{i}]")
+            fade = min(FADE, d / 4)
+            tail = (f"apad,atrim=duration={d:.6f},asetpts=PTS-STARTPTS,"
+                    f"afade=t=in:d={fade:.4f},afade=t=out:st={d - fade:.6f}:d={fade:.4f}[a{i}]")
+            tempo = f",{atempo_chain(speed)}" if abs(speed - 1.0) > 1e-6 else ""
+            if clip["has_audio"]:
+                parts.append(f"[{vi}:a:0]{afmt},asetpts=PTS-STARTPTS{tempo},{tail}")
+            else:
+                parts.append(f"anullsrc=r={AUDIO_RATE}:cl=stereo,{afmt},atrim=duration={d + 0.5:.6f},"
+                             f"asetpts=PTS-STARTPTS,{tail}")
+        total_frames += n
+        labels.append(f"[v{i}][a{i}]")
+    if not labels:
+        raise MediaError("남길 구간이 없습니다. 컷이 영상 전체를 덮고 있습니다.")
+    parts.append("".join(labels) + f"concat=n={len(labels)}:v=1:a=1[vc][ac]")
+    parts.append(f"[vc]{video_filter or 'null'}[vout]")
+    return args, ";\n".join(parts), total_frames / fps

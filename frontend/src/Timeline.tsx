@@ -570,18 +570,18 @@ export default function Timeline(p: Props) {
               return (
                 <div
                   key={s.id}
-                  className={`sub ${sel ? "sel" : ""} ${s.needs_review ? "review" : ""}`}
+                  className={`sub ${sel ? "sel" : ""} ${s.needs_review ? "review" : ""} ${s.free ? "free" : ""}`}
                   style={{ left: s.start * p.pps, width: Math.max(2, (s.end - s.start) * p.pps) }}
                   title={`${s.text}\n${fmt(s.start, 2)} ~ ${fmt(s.end, 2)}${s.review_reasons.length ? "\n⚠ " + s.review_reasons.join("\n⚠ ") : ""}`}
                   onPointerDown={(e) => {
                     p.onSelect({ kind: "sub", id: s.id });
-                    startDrag(e, { type: "sub-move", id: s.id, t0: snap(tAt(e.clientX)), orig: s });
+                    if (!s.free) startDrag(e, { type: "sub-move", id: s.id, t0: snap(tAt(e.clientX)), orig: s });
                   }}
                   onDoubleClick={(e) => e.stopPropagation()}
                 >
-                  <span>{s.text}</span>
-                  <div className="h l" onPointerDown={(e) => startDrag(e, { type: "sub-l", id: s.id, t0: snap(tAt(e.clientX)), orig: s })} />
-                  <div className="h r" onPointerDown={(e) => startDrag(e, { type: "sub-r", id: s.id, t0: snap(tAt(e.clientX)), orig: s })} />
+                  <span>{s.free ? "🔓 " : ""}{s.text}</span>
+                  {!s.free && <div className="h l" onPointerDown={(e) => startDrag(e, { type: "sub-l", id: s.id, t0: snap(tAt(e.clientX)), orig: s })} />}
+                  {!s.free && <div className="h r" onPointerDown={(e) => startDrag(e, { type: "sub-r", id: s.id, t0: snap(tAt(e.clientX)), orig: s })} />}
                 </div>
               );
             })}

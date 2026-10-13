@@ -7,8 +7,10 @@ const LIMIT = 200;
  * - set(next): 한 번의 변경으로 기록
  * - 드래그처럼 연속 변경은 begin() → set(next, false) 반복 → end() 로 한 번만 기록
  */
-export function useHistory<T>(initial: T) {
-  const [present, setPresent] = useState(initial);
+export function useHistory<T>(initial: T, normalize?: (v: T) => T) {
+  const norm = useRef(normalize);
+  norm.current = normalize;
+  const [present, setPresent] = useState(() => (normalize ? normalize(initial) : initial));
   const past = useRef<T[]>([]);
   const future = useRef<T[]>([]);
   const gestureBase = useRef<T | null>(null);
@@ -23,7 +25,8 @@ export function useHistory<T>(initial: T) {
   };
 
   const set = useCallback((next: T | ((prev: T) => T), record = true) => {
-    const value = typeof next === "function" ? (next as (p: T) => T)(presentRef.current) : next;
+    const raw = typeof next === "function" ? (next as (p: T) => T)(presentRef.current) : next;
+    const value = norm.current ? norm.current(raw) : raw;
     if (record && gestureBase.current === null) push(presentRef.current);
     presentRef.current = value;
     setPresent(value);
@@ -59,7 +62,8 @@ export function useHistory<T>(initial: T) {
   }, []);
 
   /** 서버에서 새로 받은 상태로 교체(되돌리기 기록은 남긴다). */
-  const replace = useCallback((value: T) => {
+  const replace = useCallback((raw: T) => {
+    const value = norm.current ? norm.current(raw) : raw;
     push(presentRef.current);
     presentRef.current = value;
     setPresent(value);

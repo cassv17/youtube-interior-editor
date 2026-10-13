@@ -40,20 +40,33 @@ def _speed_filter(speed: float, mediatype: str) -> str:
 
 
 def to_xml(project: dict, segments: dict[str, list[tuple]], media: dict[str, Path],
-           name: str) -> str:
-    """segments: {clip_id: [(클립 기준 시작, 끝) 또는 (시작, 끝, 배속)]}, media: {clip_id: 미디어 파일 경로}"""
+           name: str, sequence: list[tuple] | None = None) -> str:
+    """segments: {clip_id: [(클립 기준 시작, 끝) 또는 (시작, 끝, 배속)]}, media: {clip_id: 미디어 파일 경로}
+
+    sequence가 있으면(결과 배치: 순서 바꿈·빈칸) segments 대신 그 순서와 위치를 그대로 쓴다.
+    항목: ("gap", 프레임수) 또는 ("atom", 클립, 클립 기준 시작, 끝, 배속, 결과 프레임수)
+    """
     w, h = project["output"]["width"], project["output"]["height"]
     items = []  # (clip, seg_start, seg_end, seq_in, seq_out, speed)
     pos = 0
-    for clip in project["clips"]:
-        for seg in segments.get(clip["id"], []):
-            s, e = seg[0], seg[1]
-            speed = seg[2] if len(seg) > 2 else 1.0
-            n = round((e - s) / speed * SEQ_FPS)
-            if n <= 0:
+    if sequence is not None:
+        for entry in sequence:
+            if entry[0] == "gap":
+                pos += int(entry[1])
                 continue
-            items.append((clip, s, e, pos, pos + n, speed))
-            pos += n
+            _, clip, s, e, speed, n = entry
+            items.append((clip, s, e, pos, pos + int(n), speed))
+            pos += int(n)
+    else:
+        for clip in project["clips"]:
+            for seg in segments.get(clip["id"], []):
+                s, e = seg[0], seg[1]
+                speed = seg[2] if len(seg) > 2 else 1.0
+                n = round((e - s) / speed * SEQ_FPS)
+                if n <= 0:
+                    continue
+                items.append((clip, s, e, pos, pos + n, speed))
+                pos += n
     total = pos
 
     files_written: set[str] = set()
