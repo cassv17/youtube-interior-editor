@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type Project } from "./api";
 import Editor from "./Editor";
 import { FORMAT_INFO, fileName } from "./ExportDialog";
+import { DEMO } from "./demo";
 import Home from "./Home";
 
 /** 주소 뒤 #/p/<id> 로 프로젝트를 연다(새로고침해도 그대로). */
@@ -18,7 +19,14 @@ function useRoute() {
 
 export default function App() {
   const [id, go] = useRoute();
-  return id ? <ProjectPage key={id} id={id} onBack={() => go(null)} /> : <Home onOpen={go} />;
+  const page = id ? <ProjectPage key={id} id={id} onBack={() => go(null)} /> : <Home onOpen={go} />;
+  if (!DEMO) return page;
+  return (
+    <>
+      <div className="demo-bar">체험 버전입니다 · 가짜 샘플 영상으로 화면만 둘러볼 수 있고, 업로드·분석·내보내기는 내 PC에 설치해야 쓸 수 있습니다.</div>
+      {page}
+    </>
+  );
 }
 
 function ProjectPage({ id, onBack }: { id: string; onBack: () => void }) {

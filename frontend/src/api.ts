@@ -1,4 +1,5 @@
 // 백엔드 API 타입과 호출 함수
+import { DEMO, DEMO_MSG, demoProject, demoSummary, demoWave } from "./demo";
 
 export interface Clip {
   id: string;
@@ -260,7 +261,7 @@ const json = (method: string, body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
-export const api = {
+const realApi = {
   list: () => request<ProjectSummary[]>("/api/projects"),
   get: (id: string) => request<Project>(`/api/projects/${id}`),
   uploadAsset: (id: string, file: File) => {
@@ -298,8 +299,34 @@ export const api = {
   downloadUrl: (path: string) => `/api/download?path=${encodeURIComponent(path)}`,
 };
 
+// 체험 모드: 읽기는 샘플 데이터, 저장은 무시, 서버가 필요한 기능은 안내 메시지로 막는다
+const blocked = () => Promise.reject(new Error(DEMO_MSG));
+const demoApi: typeof realApi = {
+  ...realApi,
+  list: () => Promise.resolve(demoSummary()),
+  get: () => Promise.resolve(demoProject()),
+  waveform: () => Promise.resolve(demoWave()),
+  proxyUrl: () => "/demo/proxy.mp4",
+  saveEdits: () => Promise.resolve({ ok: true, updated: new Date().toISOString() }),
+  uploadAsset: blocked,
+  removeAsset: blocked,
+  remove: blocked,
+  start: blocked,
+  interpretRequest: blocked,
+  analyzeReference: blocked,
+  redetect: blocked,
+  reproxy: blocked,
+  export: blocked,
+  openOutput: blocked,
+  reorder: blocked,
+  finalize: blocked,
+};
+
+export const api = DEMO ? demoApi : realApi;
+
 /** 파일 업로드(진행률 표시를 위해 XMLHttpRequest 사용). */
 export function uploadFiles(files: File[], onProgress: (frac: number) => void): Promise<Project> {
+  if (DEMO) return Promise.reject(new Error(DEMO_MSG));
   return new Promise((resolve, reject) => {
     const form = new FormData();
     files.forEach((f) => form.append("files", f, f.name));

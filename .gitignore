@@ -20,3 +20,4 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 frontend/tsconfig.tsbuildinfo
+frontend/dist-demo/
