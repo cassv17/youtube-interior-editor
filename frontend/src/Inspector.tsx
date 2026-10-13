@@ -1,5 +1,9 @@
 import { useState } from "react";
-import type { ClipAnalysis, Clip, Cut, LayoutItem, SilenceParams, SpeedRange, Style, Subtitle } from "./api";
+import type { Asset, ClipAnalysis, Clip, Cut, LayoutItem, SilenceParams, SpeedRange, Style, Subtitle } from "./api";
+import { NumField } from "./fields";
+import { AssetsTab, MarkerEditor, OverlayEditor, TrackEditor } from "./LayerPanels";
+import type { Marker, Overlay, Track } from "./layers";
+import type { useLayerActions } from "./useLayerActions";
 import type { Placed } from "./layout";
 import type { Selection } from "./Timeline";
 import { adjacentCut, edgeKind, type Piece } from "./pieces";
@@ -11,6 +15,9 @@ export interface EditDoc {
   speeds: SpeedRange[];
   splits: number[];
   layout: LayoutItem[];
+  tracks: Track[];
+  overlays: Overlay[];
+  markers: Marker[];
   style: Style;
 }
 
@@ -42,10 +49,18 @@ interface Props {
   onDeletePiece: (pc: Piece) => void;
   onRejoin: (pc: Piece, side: "l" | "r") => void;
   requestNotes: string[]; // 처음 요청 중 자동으로 적용하지 못한 항목
+  projectId: string;
+  assets: Asset[];
+  actions: ReturnType<typeof useLayerActions>;
+  seekE: (e: number) => void;
+  assetBusy: string;
+  assetError: string;
+  onUploadAssets: (files: FileList | File[]) => void;
+  onRemoveAsset: (a: Asset) => void;
   onRedetect: (p: SilenceParams) => Promise<void>;
 }
 
-type Tab = "edit" | "silence" | "style";
+type Tab = "edit" | "silence" | "style" | "assets";
 
 export default function Inspector(p: Props) {
   const [tab, setTab] = useState<Tab>("edit");
@@ -55,11 +70,24 @@ export default function Inspector(p: Props) {
         <button className={tab === "edit" ? "on" : ""} onClick={() => setTab("edit")}>편집</button>
         <button className={tab === "silence" ? "on" : ""} onClick={() => setTab("silence")}>무음 설정</button>
         <button className={tab === "style" ? "on" : ""} onClick={() => setTab("style")}>자막 스타일</button>
+        <button className={tab === "assets" ? "on" : ""} onClick={() => setTab("assets")}>자료</button>
       </nav>
       <div className="panel">
         {tab === "edit" && <EditTab {...p} />}
         {tab === "silence" && <SilenceTab {...p} />}
         {tab === "style" && <StyleTab {...p} />}
+        {tab === "assets" && (
+          <AssetsTab
+            projectId={p.projectId}
+            assets={p.assets}
+            usedIds={new Set(p.doc.overlays.filter((o) => o.type !== "clip").map((o) => o.src))}
+            busy={p.assetBusy}
+            error={p.assetError}
+            onUpload={p.onUploadAssets}
+            onAdd={(a) => { p.actions.addAsset(a); setTab("edit"); }}
+            onRemove={p.onRemoveAsset}
+          />
+        )}
       </div>
     </aside>
   );
@@ -69,6 +97,22 @@ export default function Inspector(p: Props) {
 
 function EditTab(p: Props) {
   const sel = p.selection;
+  const layerCtx = {
+    doc: p.doc, assets: p.assets, clips: p.clips, actions: p.actions, begin: p.begin, end: p.end,
+    onSelect: (s: { kind: "overlay" | "track" | "marker" | "piece" | "sub"; id: string } | null) => p.onSelect(s), seekE: p.seekE, time: p.time,
+  };
+  if (sel?.kind === "overlay") {
+    const o = p.doc.overlays.find((x) => x.id === sel.id);
+    if (o) return <OverlayEditor o={o} ctx={layerCtx} />;
+  }
+  if (sel?.kind === "track") {
+    const t = p.doc.tracks.find((x) => x.id === sel.id);
+    if (t) return <TrackEditor t={t} ctx={layerCtx} />;
+  }
+  if (sel?.kind === "marker") {
+    const m = p.doc.markers.find((x) => x.id === sel.id);
+    if (m) return <MarkerEditor m={m} ctx={layerCtx} />;
+  }
   if (sel?.kind === "sub") {
     const s = p.doc.subtitles.find((x) => x.id === sel.id);
     if (s) return <SubEditor {...p} sub={s} />;
@@ -175,25 +219,6 @@ function TimeFields(props: { start: number; end: number; min: number; max: numbe
   );
 }
 
-/** 입력 중에는 그대로 두고, Enter나 포커스 이동 시에 반영한다. */
-function NumField({ value, onCommit }: { value: number; onCommit: (v: string) => void }) {
-  const [draft, setDraft] = useState<string | null>(null);
-  const commit = () => {
-    if (draft !== null) onCommit(draft);
-    setDraft(null);
-  };
-  return (
-    <input
-      type="number"
-      step={0.1}
-      value={draft ?? value.toFixed(2)}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => e.key === "Enter" && commit()}
-    />
-  );
-}
-
 function Reasons({ reasons, onResolve }: { reasons: string[]; onResolve: () => void }) {
   if (!reasons.length) return null;
   return (
@@ -224,6 +249,15 @@ function SubEditor(p: Props & { sub: Subtitle }) {
         onChange={(e) => patch((x) => ({ ...x, text: e.target.value }))}
       />
       <div className="count">{s.text.length}자</div>
+      <label className="field">
+        자막 레이어
+        <select
+          value={s.track && p.doc.tracks.some((t) => t.id === s.track && t.kind === "subtitle") ? s.track : p.doc.tracks.filter((t) => t.kind === "subtitle").slice(-1)[0]?.id}
+          onChange={(e) => p.actions.setSubTrack(s.id, e.target.value, true)}
+        >
+          {p.doc.tracks.filter((t) => t.kind === "subtitle").map((t) => <option key={t.id} value={t.id}>{t.name} ({t.id})</option>)}
+        </select>
+      </label>
       {s.free ? (
         <>
           <TimeFields start={s.e_start ?? 0} end={s.e_end ?? 0} min={0} max={1e5}

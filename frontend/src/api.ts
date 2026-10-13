@@ -7,6 +7,7 @@ export interface Clip {
   duration: number;
   width: number;
   height: number;
+  has_audio?: boolean;
 }
 
 export interface Cut {
@@ -37,6 +38,7 @@ export interface Subtitle {
   needs_review: boolean;
   review_reasons: string[];
   words: Word[];
+  track?: string; // 자막 레이어(트랙) id. 없으면 맨 아래 자막 레이어
   free?: boolean; // 조각에서 분리된 자막: 결과 영상 시간(e_start~e_end)에 고정
   e_start?: number;
   e_end?: number;
@@ -105,6 +107,21 @@ export interface Group {
 }
 
 /** 결과 배치의 조각: 원본 구간 [a, b]와 결과에서 그 앞에 두는 빈칸(초). 배열 순서가 결과 순서다. */
+export type { Marker, Overlay, Track } from "./layers";
+
+/** 다른 레이어에 올릴 수 있는 추가 자료(영상·이미지·음악) */
+export interface Asset {
+  id: string;
+  name: string;
+  kind: "video" | "image" | "audio";
+  duration: number;
+  width: number;
+  height: number;
+  has_audio: boolean;
+  preview: string;
+  size?: number;
+}
+
 export interface LayoutItem {
   id: string;
   a: number;
@@ -195,6 +212,10 @@ export interface Project {
   speed_ranges?: SpeedRange[];
   splits?: number[];
   layout?: LayoutItem[];
+  tracks?: import("./layers").Track[];
+  overlays?: import("./layers").Overlay[];
+  markers?: import("./layers").Marker[];
+  assets?: Asset[];
   request?: RequestNote;
   reference?: ReferenceNote;
   proxy?: string;
@@ -242,6 +263,13 @@ const json = (method: string, body: unknown): RequestInit => ({
 export const api = {
   list: () => request<ProjectSummary[]>("/api/projects"),
   get: (id: string) => request<Project>(`/api/projects/${id}`),
+  uploadAsset: (id: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return request<Asset>(`/api/projects/${id}/assets`, { method: "POST", body: form });
+  },
+  removeAsset: (id: string, aid: string) => request<{ ok: boolean }>(`/api/projects/${id}/assets/${aid}`, { method: "DELETE" }),
+  assetUrl: (id: string, aid: string) => `/api/projects/${id}/assets/${aid}/file`,
   remove: (id: string) => request<{ ok: boolean; freed: number }>(`/api/projects/${id}`, { method: "DELETE" }),
   start: (id: string, order: string[], silence: SilenceParams, extra?: { style?: Partial<Style>; reference?: ReferenceNote; request?: RequestPayload }) =>
     request<{ ok: boolean }>(`/api/projects/${id}/start`, json("POST", { order, silence, ...extra })),
@@ -252,7 +280,7 @@ export const api = {
     form.append("file", file, file.name);
     return request<ReferenceResult>("/api/reference", { method: "POST", body: form });
   },
-  saveEdits: (id: string, edits: { cuts: Cut[]; subtitles: Subtitle[]; speeds: SpeedRange[]; splits: number[]; layout: LayoutItem[]; style: Style }) =>
+  saveEdits: (id: string, edits: { cuts: Cut[]; subtitles: Subtitle[]; speeds: SpeedRange[]; splits: number[]; layout: LayoutItem[]; tracks: import("./layers").Track[]; overlays: import("./layers").Overlay[]; markers: import("./layers").Marker[]; style: Style }) =>
     request<{ ok: boolean; updated: string }>(`/api/projects/${id}/edits`, json("PUT", edits)),
   redetect: (id: string, params: SilenceParams) =>
     request<Project>(`/api/projects/${id}/redetect`, json("POST", params)),

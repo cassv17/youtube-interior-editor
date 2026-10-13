@@ -192,14 +192,15 @@ def output_subtitles(project: dict) -> list[dict]:
     """결과 영상 기준 자막. 배치(순서 바꿈·빈칸)가 있으면 조각 위치를 따라가고, 없으면 컷만 반영한다."""
     speeds = merged_speeds(project)
     items = layout_mod.items_of(project)
-    if items is None:
+    extra = layers_mod.carried_atoms(project)
+    if items is None and not extra:
         return remap_subtitles(project, merged_cuts(project), speeds)
-    placed, _ = layout_mod.place(items, speeds)
+    placed, _ = layout_mod.place(items if items is not None else layout_mod.default_items(project), speeds)
     raw = []
     for s in project["subtitles"]:
         tid = _visible_subtitle(project, s)
         if tid and not s.get("free"):
-            raw += [(a, b, text, tid) for a, b, text in layout_mod.instances(placed, [s])]
+            raw += [(a, b, text, tid) for a, b, text in layout_mod.instances(placed, [s], extra)]
     return _finish_subtitles(raw + _free_subtitles(project))
 
 

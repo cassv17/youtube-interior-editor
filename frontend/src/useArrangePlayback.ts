@@ -81,11 +81,16 @@ export function useArrangePlayback(video: RefObject<HTMLVideoElement | null>, pl
         const next = list[index + 1];
         if (!next) {
           v.pause();
-          setT(totalRef.current);
-          setPlaying(false);
           setBlank(true);
           mode.current = "gap";
-          stopTimer();
+          cur.current = { atom, index };
+          if (atom.e1 >= totalRef.current - 0.02) {
+            setT(totalRef.current);
+            setPlaying(false);
+            stopTimer();
+          } else {
+            setT(atom.e1); // 레이어가 더 남아 있으면 시계만 계속 흘린다
+          }
           return;
         }
         if (next.e0 <= atom.e1 + 0.012) {
@@ -114,7 +119,7 @@ export function useArrangePlayback(video: RefObject<HTMLVideoElement | null>, pl
       startVideoAt(next, list.indexOf(next), next.a);
       return;
     }
-    if (!next || t >= totalRef.current) {
+    if (t >= totalRef.current) {
       setT(totalRef.current);
       setPlaying(false);
       stopTimer();

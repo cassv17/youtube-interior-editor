@@ -146,20 +146,21 @@ def default_items(project: dict) -> list[dict]:
     return [{"id": f"pc-{fr(a)}", "a": grid(a), "b": grid(b), "gap": 0.0} for a, b in kept_pieces(project)]
 
 
-def instances(placed: list[Placed], subs: list[dict]) -> list[tuple[float, float, str]]:
-    """조각을 따라가는 자막을 결과 시간(초)으로 옮긴다. 분리된(free) 자막은 호출하는 쪽에서 따로 다룬다."""
+def instances(placed: list[Placed], subs: list[dict], extra: list | None = None) -> list[tuple[float, float, str]]:
+    """조각을 따라가는 자막을 결과 시간(초)으로 옮긴다. 분리된(free) 자막은 호출하는 쪽에서 따로 다룬다.
+    extra: 자막을 함께 가져가는 다른 레이어의 조각(Atom 모양)."""
+    atoms = [at for it in placed for at in it.atoms] + list(extra or [])
     out: list[tuple[float, float, str]] = []
     for s in subs:
         if s.get("free"):
             continue
         parts: list[list[float]] = []
-        for it in placed:
-            for at in it.atoms:
-                lo, hi = max(s["start"], at.a), min(s["end"], at.b)
-                if hi - lo <= EPS:
-                    continue
-                r = (at.f1 - at.f0) / FPS / (at.b - at.a)
-                parts.append([at.f0 / FPS + (lo - at.a) * r, at.f0 / FPS + (hi - at.a) * r])
+        for at in atoms:
+            lo, hi = max(s["start"], at.a), min(s["end"], at.b)
+            if hi - lo <= EPS:
+                continue
+            r = (at.f1 - at.f0) / FPS / (at.b - at.a)
+            parts.append([at.f0 / FPS + (lo - at.a) * r, at.f0 / FPS + (hi - at.a) * r])
         parts.sort()
         merged: list[list[float]] = []
         for p in parts:

@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type Cut, type Group, type Project, type SilenceParams, type Subtitle } from "./api";
+import { api, type Asset, type Cut, type Group, type Project, type SilenceParams, type Subtitle } from "./api";
 import ExportDialog from "./ExportDialog";
 import Inspector, { type EditDoc } from "./Inspector";
 import Timeline, { newCut, newSub, type Doc, type Selection } from "./Timeline";
 import { useHistory } from "./useHistory";
-import VideoPreview from "./VideoPreview";
+import VideoPreview, { type PreviewSub } from "./VideoPreview";
 import ArrangeTimeline, { type ArrangeSelection } from "./ArrangeTimeline";
+import LayerStage from "./LayerStage";
+import { defaultTracks, editPoints, nextPoint, ofKind, prevPoint, totalWithLayers } from "./layers";
+import { useLayerActions } from "./useLayerActions";
 import { isDefaultLayout, moveItem, placeItems, pToE, eToP, reconcile, setGap, subInstances, type Item } from "./layout";
 import { adjacentCut, computePieces, edgeKind, reviveRange, type Piece } from "./pieces";
 import { clamp, fmt, snap, uid } from "./time";
@@ -45,7 +48,10 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
     return sameItems(next, d.layout) ? d : { ...d, layout: next };
   };
   const hist = useHistory<EditDoc>(
-    { cuts: project.cuts, subtitles: project.subtitles, speeds: project.speed_ranges ?? [], splits: project.splits ?? [], layout: project.layout ?? [], style: project.style },
+    {
+      cuts: project.cuts, subtitles: project.subtitles, speeds: project.speed_ranges ?? [], splits: project.splits ?? [], layout: project.layout ?? [],
+      tracks: project.tracks?.length ? project.tracks : defaultTracks(), overlays: project.overlays ?? [], markers: project.markers ?? [], style: project.style,
+    },
     normalize,
   );
   const doc = hist.present;
@@ -69,8 +75,12 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
 
   const cutsMerged = useMemo(() => mergedCuts(doc.cuts), [doc.cuts]);
   const removed = cutsMerged.reduce((a, [s, e]) => a + (e - s), 0);
-  const { placed, total } = useMemo(() => placeItems(doc.layout, doc.speeds), [doc.layout, doc.speeds]);
+  const { placed, total: mainTotal } = useMemo(() => placeItems(doc.layout, doc.speeds), [doc.layout, doc.speeds]);
+  const total = useMemo(() => totalWithLayers(mainTotal, doc.tracks, doc.overlays), [mainTotal, doc.tracks, doc.overlays]); // 레이어가 더 길면 그만큼 늘어난다
   const resultDuration = total;
+  const [assets, setAssets] = useState<Asset[]>(project.assets ?? []);
+  const [assetBusy, setAssetBusy] = useState("");
+  const [assetError, setAssetError] = useState("");
   const layoutIsDefault = isDefaultLayout(doc.layout);
   const pieces = useMemo<Piece[]>(
     () => [...doc.layout].sort((x, y) => x.a - y.a).map((i) => ({ id: i.id, start: i.a, end: i.b })),
@@ -84,14 +94,40 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
   const [multiSubs, setMultiSubs] = useState<string[]>([]);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const arrange = useArrangePlayback(video, placed, total, view === "arrange");
-  const subInst = useMemo(() => subInstances(placed, doc.subtitles), [placed, doc.subtitles]);
-  const arrangeSub = useMemo(() => {
-    const hit = subInst.find((i) => arrange.time >= i.e0 && arrange.time < i.e1);
-    return hit ? doc.subtitles.find((s) => s.id === hit.id) ?? null : null;
-  }, [subInst, arrange.time, doc.subtitles]);
+  // 메인에서 빼서 위 레이어로 올린 조각은 그 구간의 자막을 함께 가져간다
+  const carried = useMemo(() => {
+    const hidden = new Set(doc.tracks.filter((t) => t.hidden).map((t) => t.id));
+    return doc.overlays
+      .filter((o) => o.type === "clip" && o.carry_subs && !hidden.has(o.track))
+      .flatMap((o) => {
+        const c = project.clips.find((x) => x.id === o.src);
+        return c ? [{ a: c.offset + o.src_in, b: c.offset + o.src_in + o.dur, e0: o.start, e1: o.start + o.dur }] : [];
+      });
+  }, [doc.overlays, doc.tracks, project.clips]);
+  const subInst = useMemo(() => subInstances(placed, doc.subtitles, carried), [placed, doc.subtitles, carried]);
+  const subTracks = useMemo(() => ofKind(doc.tracks, "subtitle"), [doc.tracks]);
+  /** 자막이 속한 레이어(없거나 지워졌으면 맨 아래 자막 레이어)에 맞는 스타일·그리는 순서 */
+  const previewSub = useCallback((key: string, text: string, track?: string): PreviewSub | null => {
+    const tr = subTracks.find((x) => x.id === track) ?? subTracks[subTracks.length - 1];
+    if (!tr || tr.hidden) return null;
+    return { id: key, text, style: { ...doc.style, ...(tr.style ?? {}) }, z: subTracks.length - subTracks.indexOf(tr) };
+  }, [subTracks, doc.style]);
+  const arrangeSubs = useMemo(
+    () => subInst.filter((i) => arrange.time >= i.e0 && arrange.time < i.e1).map((i) => previewSub(`${i.id}-${i.e0}`, i.text, i.track)).filter((x): x is PreviewSub => !!x),
+    [subInst, arrange.time, previewSub],
+  );
   const curSpeed = doc.speeds.find((r) => time >= r.start && time < r.end)?.speed ?? 1;
   const inCut = cutsMerged.find(([s, e]) => time >= s && time < e);
-  const currentSub = doc.subtitles.find((s) => !s.free && time >= s.start && time < s.end) ?? null;
+  const sourceSubs = doc.subtitles.filter((s) => !s.free && time >= s.start && time < s.end).map((s) => previewSub(s.id, s.text, s.track)).filter((x): x is PreviewSub => !!x);
+
+  // 메인 음성(A1)의 볼륨·음소거는 메인 영상의 소리에 반영한다
+  const mainAudio = doc.tracks.find((x) => x.kind === "audio" && x.main);
+  useEffect(() => {
+    const v = video.current;
+    if (!v) return;
+    v.muted = !!mainAudio?.muted;
+    v.volume = Math.max(0, Math.min(1, mainAudio?.volume ?? 1));
+  }, [mainAudio?.muted, mainAudio?.volume]);
 
   useEffect(() => {
     api.waveform(project.id).then(setWave).catch(() => setWave(null));
@@ -304,6 +340,37 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
     setMultiSubs([]);
   };
 
+  const playheadE = () => (viewRef.current === "arrange" ? arrange.time : pToE(placed, time) ?? 0);
+  const [pmenu, setPmenu] = useState<{ kind: "piece" | "overlay"; id: string; x: number; y: number } | null>(null);
+  const actions = useLayerActions({
+    doc, set: hist.set, placed, assets, clips: project.clips, playheadE,
+    select: (s) => setSelection(s), notify: (m) => alert(m),
+  });
+
+  const uploadAssets = async (files: FileList | File[]) => {
+    setAssetError("");
+    for (const f of Array.from(files)) {
+      setAssetBusy(`'${f.name}' 처리하는 중… (영상은 미리보기 사본을 만드느라 시간이 걸릴 수 있습니다)`);
+      try {
+        const a = await api.uploadAsset(project.id, f);
+        setAssets((prev) => [...prev, a]);
+      } catch (e) {
+        setAssetError(`${f.name}: ${(e as Error).message}`);
+      }
+    }
+    setAssetBusy("");
+  };
+
+  const removeAsset = async (a: Asset) => {
+    if (!confirm(`'${a.name}' 자료를 지울까요?`)) return;
+    try {
+      await api.removeAsset(project.id, a.id);
+      setAssets((prev) => prev.filter((x) => x.id !== a.id));
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  };
+
   const onArrangeSelect = (s: ArrangeSelection, additive?: boolean) => {
     if (s?.kind === "sub" && additive) {
       setMultiSubs((prev) => {
@@ -330,6 +397,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
   }, [hist.set]);
 
   const splitAtPlayhead = () => {
+    if (viewRef.current === "arrange" && selection?.kind === "overlay" && actions.splitSelected(selection.id, arrange.time)) return;
     let src = video.current?.currentTime ?? time;
     if (viewRef.current === "arrange") {
       const hit = eToP(placed, arrange.time);
@@ -371,6 +439,9 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
       if (pc) deletePiece(pc);
       return;
     }
+    if (selection.kind === "overlay") return actions.deleteOverlay(selection.id);
+    if (selection.kind === "marker") return actions.deleteMarker(selection.id);
+    if (selection.kind === "track") return;
     hist.set((d) =>
       selection.kind === "cut"
         ? { ...d, cuts: d.cuts.filter((c) => c.id !== selection.id) }
@@ -379,7 +450,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
           : { ...d, subtitles: d.subtitles.filter((s) => s.id !== selection.id) },
     );
     setSelection(null);
-  }, [selection, hist.set, pieces, deletePiece]);
+  }, [selection, hist.set, pieces, deletePiece, actions.deleteOverlay, actions.deleteMarker]);
 
   const addCut = () => {
     const t = snap(time);
@@ -443,9 +514,17 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
       if (e.key === " ") {
         e.preventDefault();
         togglePlayAny();
-      } else if (e.key.toLowerCase() === "m" && !mod && viewRef.current === "arrange") {
+      } else if (e.key.toLowerCase() === "n" && !mod && viewRef.current === "arrange") {
         e.preventDefault();
         setMagnet((v) => !v);
+      } else if (e.key.toLowerCase() === "m" && !mod && viewRef.current === "arrange") {
+        e.preventDefault();
+        actions.addMarker(arrange.time);
+      } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && viewRef.current === "arrange") {
+        e.preventDefault();
+        const pts = editPoints(placed.flatMap((p) => [p.e0, p.e1]), doc.overlays, doc.markers);
+        const go = e.key === "ArrowUp" ? prevPoint(pts, arrange.time) : nextPoint(pts, arrange.time);
+        if (go !== null) arrange.seek(go);
       } else if (e.key.toLowerCase() === "s" && !mod) {
         e.preventDefault();
         splitRef.current();
@@ -464,7 +543,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [hist.undo, hist.redo, togglePlayAny, deleteSelected, seek, arrange.seek, arrange.time]);
+  }, [hist.undo, hist.redo, togglePlayAny, deleteSelected, seek, arrange.seek, arrange.time, placed, doc.overlays, doc.markers, actions.addMarker]);
 
   const fitAll = () => {
     const w = document.querySelector(".tl-scroll")?.clientWidth ?? 1000;
@@ -564,11 +643,17 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
             ref={video}
             src={api.proxyUrl(project.id, project.proxy)}
             aspect={project.output.width / project.output.height}
-            style={doc.style}
-            subtitle={view === "arrange" ? arrangeSub : currentSub}
+            subs={view === "arrange" ? arrangeSubs : sourceSubs}
             inCut={view === "source" && !!inCut && !skipCuts}
             speed={view === "source" && applySpeed ? curSpeed : 1}
             blank={view === "arrange" && arrange.blank}
+            blankLabel={!doc.overlays.some((o) => arrange.time >= o.start && arrange.time < o.start + o.dur && o.type !== "audio")}
+            layers={view === "arrange" ? (rect) => (
+              <LayerStage
+                rect={rect} time={arrange.time} playing={arrange.playing} projectId={project.id}
+                proxySrc={api.proxyUrl(project.id, project.proxy)} tracks={doc.tracks} overlays={doc.overlays} assets={assets} clips={project.clips}
+              />
+            ) : undefined}
             onClick={togglePlayAny}
           />
           <div className="controls">
@@ -589,7 +674,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
                 배속 적용해서 보기
               </label>
             )}
-            <span className="result">결과 길이 <b>{fmt(resultDuration)}</b> ({removed.toFixed(1)}초 제거{doc.speeds.length ? " · 배속 반영" : ""}{layoutIsDefault ? "" : " · 배치 반영"})</span>
+            <span className="result">결과 길이 <b>{fmt(resultDuration)}</b> ({removed.toFixed(1)}초 제거{doc.speeds.length ? " · 배속 반영" : ""}{layoutIsDefault ? "" : " · 배치 반영"}{doc.overlays.length ? " · 레이어 반영" : ""})</span>
           </div>
         </section>
         <Inspector
@@ -620,6 +705,14 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
           onDeletePiece={deletePiece}
           onRejoin={rejoin}
           requestNotes={project.request?.unsupported ?? []}
+          projectId={project.id}
+          assets={assets}
+          actions={actions}
+          seekE={(e) => (viewRef.current === "arrange" ? arrange.seek(e) : undefined)}
+          assetBusy={assetBusy}
+          assetError={assetError}
+          onUploadAssets={uploadAssets}
+          onRemoveAsset={removeAsset}
           onRedetect={redetect}
         />
       </div>
@@ -648,9 +741,13 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
         <button onClick={fitAll}>전체 보기</button>
         {view === "arrange" ? (
           <span className="clip-tools">
-            <button className={magnet ? "on magnet" : "magnet"} onClick={() => setMagnet((v) => !v)} title="켜면 조각이 0초·재생 위치·옆 조각 가장자리에 가까울 때 달라붙습니다 (M)">
+            <button className={magnet ? "on magnet" : "magnet"} onClick={() => setMagnet((v) => !v)} title="켜면 조각·레이어 항목이 0초·재생 위치·마커·다른 항목 가장자리에 가까울 때 달라붙습니다 (N)">
               🧲 자석 {magnet ? "켬" : "끔"}
             </button>
+            <button onClick={() => actions.addMarker(arrange.time)} title="재생 위치에 마커를 찍습니다 (M)">◆ 마커</button>
+            <button onClick={() => actions.addTrackOf("video")} title="영상 레이어를 맨 위에 추가합니다">＋영상 레이어</button>
+            <button onClick={() => actions.addTrackOf("subtitle")} title="자막 레이어를 맨 위에 추가합니다">＋자막 레이어</button>
+            <button onClick={() => actions.addTrackOf("audio")} title="음성 레이어를 맨 아래에 추가합니다">＋음성 레이어</button>
             <button onClick={resetLayout} disabled={layoutIsDefault}>배치 초기화</button>
             {multiSubs.length > 1 && <button onClick={() => mergeSubs(multiSubs)}>선택한 자막 {multiSubs.length}개 합치기</button>}
           </span>
@@ -669,7 +766,7 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
             <i className="lg-cut" /> 잘릴 구간 <i className="lg-off" /> 제안(꺼짐, 더블클릭으로 적용) <i className="lg-review" /> 확인 필요
           </span>
         ) : (
-          <span className="legend">조각을 끌어 옮기세요 · Ctrl+클릭으로 자막 여러 개 선택 · S 나누기 · M 자석</span>
+          <span className="legend">끌어서 이동 · 위 레이어가 우선 표시 · S 나누기 · N 자석 · M 마커 · ↑↓ 편집점 이동</span>
         )}
       </div>
       {view === "arrange" ? (
@@ -678,6 +775,11 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
           placed={placed}
           total={total}
           speeds={doc.speeds}
+          tracks={doc.tracks}
+          overlays={doc.overlays}
+          assets={assets}
+          clips={project.clips}
+          markers={doc.markers}
           subs={subInst}
           wave={wave}
           time={arrange.time}
@@ -685,13 +787,19 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
           pps={ppsE}
           setPps={setPpsE}
           magnet={magnet}
-          selection={selection && (selection.kind === "piece" || selection.kind === "sub") ? { kind: selection.kind, id: selection.id } : null}
+          selection={selection && ["piece", "sub", "overlay", "track", "marker"].includes(selection.kind) ? { kind: selection.kind as "piece", id: selection.id } : null}
           multiSubs={multiSubs}
           onSelect={onArrangeSelect}
           onSeek={arrange.seek}
           onLayout={setLayout}
+          onOverlays={(next, record) => hist.set((d) => ({ ...d, overlays: next }), record)}
           onMoveFreeSub={moveFreeSub}
+          onSubTrack={actions.setSubTrack}
           onSubMenu={(id, x, y) => setMenu({ id, x, y })}
+          onPieceMenu={(id, x, y) => setPmenu({ kind: "piece", id, x, y })}
+          onOverlayMenu={(id, x, y) => setPmenu({ kind: "overlay", id, x, y })}
+          onTrackPatch={actions.patchTrack}
+          onDropAsset={actions.dropAsset}
           begin={hist.begin}
           end={hist.end}
         />
@@ -719,6 +827,32 @@ export default function Editor({ project, onBack, onReload, onFinished }: Editor
         onRenameGroup={renameGroup}
       />
       )}
+      {pmenu && (() => {
+        const close = () => setPmenu(null);
+        const pc = pmenu.kind === "piece" ? placed.find((x) => x.id === pmenu.id) : null;
+        return (
+          <>
+            <div className="ctx-bg" onPointerDown={close} onContextMenu={(e) => { e.preventDefault(); close(); }} />
+            <div className="ctx-menu" style={{ left: pmenu.x, top: pmenu.y }}>
+              {pc ? (
+                <>
+                  <div className="ctx-title">조각 · {(pc.e1 - pc.e0).toFixed(1)}초</div>
+                  <button onClick={() => { actions.liftPiece(pmenu.id, true); close(); }}>위 영상 레이어로 올리기 (메인에서 빼기)</button>
+                  <button onClick={() => { actions.liftPiece(pmenu.id, false); close(); }}>위 영상 레이어에 복사 (소리 없이)</button>
+                  <button onClick={() => { const q = pieces.find((x) => x.id === pmenu.id); if (q) deletePiece(q); close(); }}>이 조각 지우기</button>
+                  <div className="ctx-hint">올린 조각은 크기·위치·투명도를 바꿔 화면 속 화면(PIP)으로 쓸 수 있습니다</div>
+                </>
+              ) : (
+                <>
+                  <div className="ctx-title">레이어 항목</div>
+                  <button onClick={() => { actions.splitSelected(pmenu.id, arrange.time); close(); }}>재생 위치에서 나누기</button>
+                  <button onClick={() => { actions.deleteOverlay(pmenu.id); close(); }}>삭제</button>
+                </>
+              )}
+            </div>
+          </>
+        );
+      })()}
       {menu && (() => {
         const s = doc.subtitles.find((x) => x.id === menu.id);
         if (!s) return null;

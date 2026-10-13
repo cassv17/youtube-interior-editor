@@ -3,7 +3,7 @@ import type { Clip, Cut, Group, SpeedRange, Subtitle } from "./api";
 import { adjacentCut, edgeKind, reviveRange, splitBounds, type EdgeKind, type Piece } from "./pieces";
 import { clamp, fmt, snap, uid } from "./time";
 
-export type Selection = { kind: "cut" | "sub" | "speed" | "piece"; id: string } | null;
+export type Selection = { kind: "cut" | "sub" | "speed" | "piece" | "overlay" | "track" | "marker"; id: string } | null;
 
 export interface Doc {
   cuts: Cut[];

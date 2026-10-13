@@ -158,6 +158,7 @@ def clean_overlays(raw, project: dict) -> list[dict]:
             lo = _num(x.get("src_in"), 0.0, c["duration"], 0.0)
             hi = _num(x.get("src_out"), 0.0, c["duration"], c["duration"])
             item["has_audio"] = bool(c.get("has_audio"))
+            item["carry_subs"] = bool(x.get("carry_subs"))  # 메인에서 뺀 조각: 그 구간의 자막을 함께 가져간다
         else:
             a = assets.get(src)
             if not a or a["kind"] != ("image" if typ == "image" else typ):
@@ -238,6 +239,24 @@ class Plan:
     @property
     def empty(self) -> bool:
         return not self.visuals and not self.audios and abs(self.main_volume - 1.0) < 1e-6
+
+
+def carried_atoms(project: dict) -> list:
+    """자막을 함께 가져가는 원본 영상 조각 레이어(보이는 트랙만)의 (원본 시간 구간 → 결과 시간 구간). layout.Atom 모양으로 돌려준다."""
+    from .layout import Atom
+
+    tmap = track_map(project)
+    clips = {c["id"]: c for c in project.get("clips", [])}
+    out = []
+    for o in project.get("overlays", []):
+        t = tmap.get(o.get("track"))
+        c = clips.get(o.get("src"))
+        if o.get("type") != "clip" or not o.get("carry_subs") or not t or t.get("hidden") or not c:
+            continue
+        a = c["offset"] + o["src_in"]
+        f0 = fr(o["start"])
+        out.append(Atom(a, a + o["dur"], 1.0, f0, f0 + max(1, fr(o["dur"]))))
+    return out
 
 
 def build_plan(project: dict) -> Plan:

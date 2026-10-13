@@ -303,13 +303,23 @@ export interface SubLike {
   start: number;
   end: number;
   text: string;
+  track?: string;
   free?: boolean; // 조각에서 분리된 자막: 결과 시간(e_start~e_end)에 고정
   e_start?: number;
   e_end?: number;
 }
 
+/** 자막이 따라가는 소재 구간: 원본 시간 [a, b] → 결과 시간 [e0, e1] (다른 레이어로 올린 조각도 이 모양) */
+export interface ExtraAtom {
+  a: number;
+  b: number;
+  e0: number;
+  e1: number;
+}
+
 export interface SubInstance {
   id: string;
+  track?: string;
   text: string;
   e0: number;
   e1: number;
@@ -317,23 +327,22 @@ export interface SubInstance {
 }
 
 /** 자막을 결과 시간으로 옮긴 목록. 조각을 따라가는 자막은 자기 원본 구간이 놓인 자리에 나타난다. */
-export function subInstances(placed: Placed[], subs: SubLike[]): SubInstance[] {
+export function subInstances(placed: Placed[], subs: SubLike[], extra: ExtraAtom[] = []): SubInstance[] {
+  const atoms: ExtraAtom[] = [...placed.flatMap((it) => it.atoms), ...extra];
   const out: SubInstance[] = [];
   for (const s of subs) {
     if (s.free) {
       if (s.e_start != null && s.e_end != null && s.e_end > s.e_start)
-        out.push({ id: s.id, text: s.text, e0: s.e_start, e1: s.e_end, free: true });
+        out.push({ id: s.id, track: s.track, text: s.text, e0: s.e_start, e1: s.e_end, free: true });
       continue;
     }
     const parts: [number, number][] = [];
-    for (const it of placed) {
-      for (const at of it.atoms) {
-        const lo = Math.max(s.start, at.a);
-        const hi = Math.min(s.end, at.b);
-        if (hi - lo <= EPS) continue;
-        const r = (at.e1 - at.e0) / (at.b - at.a);
-        parts.push([at.e0 + (lo - at.a) * r, at.e0 + (hi - at.a) * r]);
-      }
+    for (const at of atoms) {
+      const lo = Math.max(s.start, at.a);
+      const hi = Math.min(s.end, at.b);
+      if (hi - lo <= EPS) continue;
+      const r = (at.e1 - at.e0) / (at.b - at.a);
+      parts.push([at.e0 + (lo - at.a) * r, at.e0 + (hi - at.a) * r]);
     }
     parts.sort((x, y) => x[0] - y[0]);
     const merged: [number, number][] = [];
@@ -342,7 +351,7 @@ export function subInstances(placed: Placed[], subs: SubLike[]): SubInstance[] {
       if (last && p[0] <= last[1] + 1e-4) last[1] = Math.max(last[1], p[1]);
       else merged.push([p[0], p[1]]);
     }
-    for (const [e0, e1] of merged) out.push({ id: s.id, text: s.text, e0, e1, free: false });
+    for (const [e0, e1] of merged) out.push({ id: s.id, track: s.track, text: s.text, e0, e1, free: false });
   }
   return out.sort((x, y) => x.e0 - y.e0);
 }

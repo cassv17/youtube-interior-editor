@@ -190,3 +190,11 @@ test("자막: 배속 구간에서는 결과 시간이 줄어든다", () => {
   const inst = subInstances(placed, [{ id: "s", start: 2, end: 4, text: "빠름" }, { id: "t", start: 4, end: 5, text: "뒤" }]);
   assert.deepEqual(inst.map((i) => [i.id, i.e0, i.e1]), [["s", 2, 3], ["t", 3, 4]]);
 });
+
+test("자막: 위 레이어로 올린 조각(extra)이 자막을 함께 가져간다", () => {
+  const { placed } = placeItems([it("a", 0, 2)], []);                          // 메인에는 원본 0~2초만 남음
+  const extra = [{ a: 6, b: 10, e0: 20, e1: 24 }];                              // 원본 6~10초가 결과 20초로 올라감
+  const subs = [{ id: "s1", start: 1, end: 1.5, text: "메인" }, { id: "s2", start: 7, end: 8, text: "올린 조각" }];
+  assert.deepEqual(subInstances(placed, subs, extra).map((i) => [i.id, i.e0, i.e1]), [["s1", 1, 1.5], ["s2", 21, 22]]);
+  assert.deepEqual(subInstances(placed, subs).map((i) => i.id), ["s1"]);       // 가져가지 않으면 사라진다
+});

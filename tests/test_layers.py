@@ -267,6 +267,24 @@ class LayerEncodeTest(unittest.TestCase):
         mp4, total = self.render(p, "l7.mp4")
         self.assertAlmostEqual(total, 10.0, places=2)
 
+    def test_lifted_clip_layer_carries_its_subtitles_but_a_copy_does_not(self):
+        p = self.proj()
+        cid = p["clips"][0]["id"]
+        p["cuts"] = [{"id": "x", "clip_id": cid, "start": 6.0, "end": 10.0, "enabled": True, "origin": "user",
+                      "needs_review": False, "review_reasons": []}]            # 6~10초를 메인에서 뺌
+        p["subtitles"] = [{"id": "a", "start": 1, "end": 2, "text": "메인에 남은 자막", "clip_id": cid, "words": []},
+                          {"id": "b", "start": 7, "end": 8, "text": "올라간 조각의 자막", "clip_id": cid, "words": []}]
+        self.ov(p, [{"id": "c", "track": "V2", "type": "clip", "src": cid, "src_in": 6, "src_out": 10, "start": 12, "carry_subs": True}])
+        subs = {s["text"]: (s["start"], s["end"]) for s in export.output_subtitles(p)}
+        self.assertEqual(subs["메인에 남은 자막"], (1.0, 2.0))
+        self.assertEqual(subs["올라간 조각의 자막"], (13.0, 14.0))              # 12 + (7-6)
+        self.ov(p, [{"id": "c", "track": "V2", "type": "clip", "src": cid, "src_in": 6, "src_out": 10, "start": 12}])   # 복사: 자막 안 가져감
+        self.assertEqual([s["text"] for s in export.output_subtitles(p)], ["메인에 남은 자막"])
+        # 숨긴 레이어로 올라간 조각의 자막은 나오지 않는다
+        self.ov(p, [{"id": "c", "track": "V2", "type": "clip", "src": cid, "src_in": 6, "src_out": 10, "start": 12, "carry_subs": True}])
+        p["tracks"] = [dict(t, hidden=True) if t["id"] == "V2" else t for t in layers.default_tracks()]
+        self.assertEqual([s["text"] for s in export.output_subtitles(p)], ["메인에 남은 자막"])
+
     def test_subtitle_layers_have_their_own_style_and_upper_layer_is_in_front(self):
         p = self.proj()
         p["subtitles"] = [
