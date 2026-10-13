@@ -198,3 +198,13 @@ test("자막: 위 레이어로 올린 조각(extra)이 자막을 함께 가져�
   assert.deepEqual(subInstances(placed, subs, extra).map((i) => [i.id, i.e0, i.e1]), [["s1", 1, 1.5], ["s2", 21, 22]]);
   assert.deepEqual(subInstances(placed, subs).map((i) => i.id), ["s1"]);       // 가져가지 않으면 사라진다
 });
+
+test("긴 조각도 마우스가 앞 조각 중심을 넘으면 앞으로 순서가 바뀐다", () => {
+  const items = [it("p1", 0, 0.4), it("p2", 0.4, 4.8), it("p3", 4.8, 11.6)];
+  // 조각 중심 기준으로는 0초에 막혀 앞으로 갈 수 없었다
+  assert.deepEqual(moveItem(items, [], "p3", 0, { magnet: false, threshold: 0 }).items.map((x) => x.id), ["p1", "p2", "p3"]);
+  const r = moveItem(items, [], "p3", 0, { magnet: false, threshold: 0, pointer: 1 });
+  assert.deepEqual(r.items.map((x) => x.id), ["p1", "p3", "p2"]);
+  const r2 = moveItem(items, [], "p3", 0, { magnet: false, threshold: 0, pointer: 0.1 });
+  assert.deepEqual(r2.items.map((x) => x.id), ["p3", "p1", "p2"]);
+});

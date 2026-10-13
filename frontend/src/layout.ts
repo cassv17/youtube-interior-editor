@@ -226,6 +226,7 @@ export interface MoveOpts {
   magnet: boolean;
   threshold: number; // 자석이 붙는 거리(초)
   playhead?: number | null; // 재생 위치(결과 시간)도 붙는 대상
+  pointer?: number | null; // 끌고 있는 마우스의 결과 시간 위치(순서 판단용)
 }
 
 /**
@@ -275,8 +276,10 @@ export function moveItem(
   }
   const xf = fr(x);
 
-  const center = x + L / 2;
-  const k = others.filter((o) => (o.e0 + o.e1) / 2 < center).length;
+  // 순서는 마우스가 가리키는 위치(없으면 조각 중심)가 다른 조각의 중심을 넘었는지로 정한다.
+  // 긴 조각은 0초에 막혀 중심이 짧은 조각 중심보다 앞으로 못 가므로 마우스 위치를 기준으로 삼는다.
+  const key = opts.pointer ?? x + L / 2;
+  const k = others.filter((o) => (o.e0 + o.e1) / 2 < key).length;
   const order = [...others.slice(0, k), m, ...others.slice(k)];
 
   const out: Item[] = [];

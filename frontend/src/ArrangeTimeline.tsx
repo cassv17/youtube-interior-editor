@@ -214,7 +214,7 @@ export default function ArrangeTimeline(p: Props) {
         if (Math.abs(e.clientX - d.x0) < 4) return;
         d.moved = true;
       }
-      const r = moveItem(d.base, p.speeds, d.id, e0 - d.grab, { magnet: p.magnet, threshold: thr, playhead: p.time });
+      const r = moveItem(d.base, p.speeds, d.id, e0 - d.grab, { magnet: p.magnet, threshold: thr, playhead: p.time, pointer: e0 });
       setSnapAt(r.snap);
       p.onLayout(r.items, false);
       return;
