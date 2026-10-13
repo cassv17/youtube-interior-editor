@@ -63,8 +63,53 @@ def list_projects() -> list[dict]:
                 p = proj_mod.load(f)
                 row = {k: p.get(k) for k in ("id", "name", "status", "created", "updated", "duration", "completed")}
                 row["clips"] = p.get("clip_count") or len(p.get("clips") or p.get("sources") or [])
+                row["size"] = _dir_size(d)
                 out.append(row)
     return out
+
+
+def _dir_size(d: Path) -> int:
+    total = 0
+    for f in d.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def delete_project(pid: str) -> int:
+    """작업 중(임시저장) 프로젝트를 지운다: 업로드 사본·미리보기·편집 기록 전부. 지운 용량(바이트)을 돌려준다.
+
+    분석·내보내기가 진행 중이거나 대기 중이면 지우지 않는다. 결과물(output 폴더)은 건드리지 않는다.
+    파일 하나라도 못 지우면(예: 영상이 다른 프로그램에서 열려 있음) project.json을 남겨 목록에서 계속 보이게 한다.
+    """
+    with lock(pid):
+        d = project_dir(pid)
+        data = load(pid)
+        if data.get("status") == "completed":
+            raise ValueError("완료된 작업은 지울 수 없습니다. 결과 파일은 output 폴더에 있습니다.")
+        busy_export = (_export_status.get(pid) or {}).get("state") in ("queued", "running")
+        queued = any(item[1] == pid for item in list(_queue.queue))
+        if (data.get("status") == "analyzing" and pid in _status) or busy_export or queued:
+            raise RuntimeError("분석이나 내보내기가 진행 중인 작업은 지울 수 없습니다. 끝난 뒤에 다시 시도해 주세요.")
+        size = _dir_size(d)
+        failed = []
+        for item in list(d.iterdir()):
+            if item.name == "project.json":
+                continue
+            try:
+                shutil.rmtree(item) if item.is_dir() else item.unlink()
+            except OSError:
+                failed.append(item.name)
+        if failed:
+            raise OSError("일부 파일을 지우지 못했습니다(다른 프로그램에서 사용 중일 수 있음): " + ", ".join(failed[:3]))
+        shutil.rmtree(d)
+        _status.pop(pid, None)
+        _export_status.pop(pid, None)
+    _locks.pop(pid, None)
+    return size
 
 
 def _safe_name(name: str) -> str:

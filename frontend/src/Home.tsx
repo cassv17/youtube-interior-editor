@@ -18,6 +18,11 @@ const EXAMPLES = [
   { label: "전체 배속", text: "전체를 1.2배속으로 해줘." },
 ];
 
+const sizeText = (b?: number) => {
+  if (b === undefined) return "-";
+  return b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(2)}GB` : `${Math.max(1, Math.round(b / 1024 ** 2))}MB`;
+};
+
 export default function Home({ onOpen }: { onOpen: (id: string) => void }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [files, setFiles] = useState<File[]>([]);
@@ -133,6 +138,25 @@ export default function Home({ onOpen }: { onOpen: (id: string) => void }) {
     } catch (e) {
       setErr((e as Error).message);
       setUpload(null);
+    }
+  };
+
+  const removeProject = async (p: ProjectSummary) => {
+    const busy = p.status === "analyzing";
+    if (busy) {
+      setErr("분석 중인 작업은 지울 수 없습니다. 끝난 뒤에 다시 시도해 주세요.");
+      return;
+    }
+    if (!confirm(`'${p.name}' 작업을 삭제할까요?
+
+편집 내용과 업로드 사본(${sizeText(p.size)})이 지워지며 되돌릴 수 없습니다.
+내 원본 영상과, 이미 내보낸 결과 파일(output 폴더)은 그대로 남습니다.`)) return;
+    try {
+      await api.remove(p.id);
+      setProjects((prev) => prev.filter((x) => x.id !== p.id));
+      setErr("");
+    } catch (e) {
+      setErr((e as Error).message);
     }
   };
 
@@ -292,12 +316,14 @@ export default function Home({ onOpen }: { onOpen: (id: string) => void }) {
 
       <section className="card">
         <h2>💾 작업 중 (임시저장)</h2>
-        <p className="hint">편집 내용은 자동으로 저장됩니다. 클릭하면 이어서 작업할 수 있습니다.</p>
+        <p className="hint">
+          편집 내용은 자동으로 저장됩니다. 클릭하면 이어서 작업할 수 있습니다. 작업마다 업로드한 영상의 사본과 미리보기를 보관하므로 용량을 차지합니다(합계 {sizeText(working.reduce((a, p) => a + (p.size ?? 0), 0))}). 필요 없는 작업은 삭제해 용량을 비우세요.
+        </p>
         {working.length === 0 ? (
           <p className="hint">작업 중인 프로젝트가 없습니다.</p>
         ) : (
           <table className="projects">
-            <thead><tr><th>이름</th><th>클립</th><th>길이</th><th>상태</th><th>마지막 저장</th></tr></thead>
+            <thead><tr><th>이름</th><th>클립</th><th>길이</th><th>상태</th><th>용량</th><th>마지막 저장</th><th></th></tr></thead>
             <tbody>
               {working.map((p) => (
                 <tr key={p.id} onClick={() => onOpen(p.id)}>
@@ -305,7 +331,12 @@ export default function Home({ onOpen }: { onOpen: (id: string) => void }) {
                   <td>{p.clips}개</td>
                   <td>{p.duration ? fmt(p.duration, 0) : "-"}</td>
                   <td><span className={`status ${p.status}`}>{STATUS[p.status]}</span></td>
+                  <td>{sizeText(p.size)}</td>
                   <td>{(p.updated || p.created).replace("T", " ").slice(0, 16)}</td>
+                  <td>
+                    <button className="danger" title="이 작업과 업로드 사본을 삭제합니다"
+                      onClick={(e) => { e.stopPropagation(); removeProject(p); }}>🗑 삭제</button>
+                  </td>
                 </tr>
               ))}
             </tbody>

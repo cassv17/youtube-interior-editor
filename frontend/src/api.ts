@@ -203,6 +203,7 @@ export interface ProjectSummary {
   duration?: number;
   completed?: string;
   clips: number;
+  size?: number; // 이 작업이 차지하는 디스크 용량(바이트)
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -229,6 +230,7 @@ const json = (method: string, body: unknown): RequestInit => ({
 export const api = {
   list: () => request<ProjectSummary[]>("/api/projects"),
   get: (id: string) => request<Project>(`/api/projects/${id}`),
+  remove: (id: string) => request<{ ok: boolean; freed: number }>(`/api/projects/${id}`, { method: "DELETE" }),
   start: (id: string, order: string[], silence: SilenceParams, extra?: { style?: Partial<Style>; reference?: ReferenceNote; request?: RequestPayload }) =>
     request<{ ok: boolean }>(`/api/projects/${id}/start`, json("POST", { order, silence, ...extra })),
   interpretRequest: (text: string) =>

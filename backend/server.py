@@ -84,6 +84,19 @@ def get_project(pid: str):
     return {**data, "job": jobs.status(pid), "export_job": jobs.export_status(pid)}
 
 
+@app.delete("/api/projects/{pid}")
+def delete_project(pid: str):
+    _get(pid)
+    try:
+        return {"ok": True, "freed": jobs.delete_project(pid)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    except OSError as e:
+        raise HTTPException(500, str(e))
+
+
 @app.post("/api/projects/{pid}/start")
 def start(pid: str, body: dict):
     _get(pid)
